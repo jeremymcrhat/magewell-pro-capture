@@ -1,0 +1,13 @@
+config VIDEO_MAGEWELL
+	tristate "Magewell Procapture audio/video grabber and encoder"
+	depends on VIDEO_DEV && PCI && VIDEO_V4L2
+	select VIDEOBUF2_DMA_CONTIG
+	---help---
+	  Support for ALL Magewell procapture cards which provide
+	  multichannel video & audio grabbing and encoding (H.264,
+	  MJPEG, .....TODO).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called magewell.
+
+
