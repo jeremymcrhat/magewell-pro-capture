@@ -3,6 +3,7 @@
 #include "dev_support.h"
 #include "video.h"
 #include "irq-control.h"
+#include "ds28e01.h"
 
 
 /* take first free /dev/videoX indexes by default */
@@ -19,12 +20,31 @@ static irqreturn_t capture_irq_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+void read_serial_num(struct mag_cap_dev *mdev, char *serial_no)
+{
+    u8 serial_num[SERIAL_NO_LEN] = { 0 };
+    int i;
+
+    ds28e01_read_memory(&mdev->ds28e01, serial_num, 0, sizeof(serial_num));
+
+    for (i=0; i<SERIAL_NO_LEN-1; i++) {
+        char ch = serial_num[i];
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))
+            serial_no[i] = ch;
+        else
+            serial_no[i] = ' ';
+
+    }
+    serial_no[SERIAL_NO_LEN-1] = '\0';
+}
+
 static int magwell_probe(struct pci_dev *pci_dev,
 			const struct pci_device_id *pci_id)
 {
 	int ret = 0;
 	u32 hw_version, firmware_version;
-	u32 timeout_wait = 10000;
+	u32 timeout_wait = 1000;
+	char serial_num[SERIAL_NO_LEN] = { 0 };
 
 	struct mag_cap_dev *dev;
 
@@ -80,23 +100,27 @@ static int magwell_probe(struct pci_dev *pci_dev,
 	dev_info(&pci_dev->dev, " Hardware version: 0x%x \n", hw_version);
 	dev_info(&pci_dev->dev, " Firmware version: 0x%x \n", firmware_version);
 
-	dev_dbg(&pci_dev->dev, " disabling IRQs \n");
-	/* Disable all IRQs */
 	dev->irq_ctrl = dev->mmio + IRQ_BASE_ADDR;
+	printk(" IRQ status before 0x%x \n", xi_irq_get_enabled_status(dev));
+	printk(" disabling IRQs \n");
+	/* Disable all IRQs */
 	xi_irq_set_control(dev, 1);
 
+	printk(" enabling irqs when ready \n");
 	/*enable irq when item ready*/
 	xi_irq_set_enable_bits_value(dev, 0);
 	dev_dbg(&pci_dev->dev, " finished enabling bits \n");
 
+	printk(" IRQ status after 0x%x \n", xi_irq_get_enabled_status(dev));
+
 /**** TODO: double check security *****/
 
+	/* Initialize Security */
+	dev->dna_addr = (dev->mmio + DNA_BASE_ADDR);
+	dev->ds28e01.reg_base = (dev->mmio + OW_BASE_ADDR);
 	/* Check to see if the ds28e01 is acually there */
-	if ((pci_read_reg32(dev->mmio + DS28E01_REG_ADDR_OW_RESET) & 1) != 0)
+	if ((pci_read_reg32(dev->ds28e01.reg_base + DS28E01_REG_ADDR_OW_RESET) & 1) != 0)
 	{
-		/* Initialize Security */
-		dev->dna_addr = (dev->mmio + DNA_BASE_ADDR);
-		dev->ds28e01 = dev->mmio + OW_BASE_ADDR;
 		/* timed out spin, something must already exist???
  		   TODO: find out if there is something that I can use
 			that waits so long for a bit to be ready */
@@ -107,13 +131,15 @@ static int magwell_probe(struct pci_dev *pci_dev,
 			}
 			timeout_wait--;
 		}
-		while (!( pci_read_reg32(dev->ds28e01 + DS28E01_REG_ADDR_OW_RESET) & 2) != 0 );
-
+		while (!( pci_read_reg32(dev->ds28e01.reg_base + DS28E01_REG_ADDR_OW_RESET) & 2) != 0 );
 	}
 
 /**** END TODO ************************/
 
+
+	read_serial_num(dev, serial_num);
 	
+	dev_info(&pci_dev->dev, "  Serial NO: %s \n", serial_num);
 	/* Enable MSI TODO */
 	//enable_pci_msi(....)
 
@@ -165,6 +191,7 @@ static void magwell_cleanup(struct pci_dev *pci_dev)
 	/* unregister */
 	//tw5864_video_fini(dev);
 
+	devm_free_irq(&pci_dev->dev, pci_dev->irq, pci_dev);
 	/* release resources */
 	iounmap(dev->mmio);
 	release_mem_region(pci_resource_start(pci_dev, 0),

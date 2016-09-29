@@ -20,6 +20,11 @@ struct tw5864_dma_buf {
         dma_addr_t dma_addr;
 };
 
+struct ds28e01_device {
+    volatile void __iomem *reg_base;
+};
+
+
 struct mag_cap_dev {
 	spinlock_t slock; /* used for sync between ISR, tasklet & V4L2 API */
 	void __iomem *reg_base; /* pointer to mapped registers memory */
@@ -35,7 +40,7 @@ struct mag_cap_dev {
 	void __iomem *mmio;
 	u32 irqmask;
 	void __iomem *dna_addr;
-	void __iomem *ds28e01;
+	struct ds28e01_device ds28e01;
 	void __iomem *irq_ctrl;
 };
 

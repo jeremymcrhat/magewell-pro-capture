@@ -67,4 +67,6 @@ static inline void pci_write_reg32(volatile void *addr, uint32_t val) {
 	writel(val, addr);
 }
 
+#define SERIAL_NO_LEN	16
+
 #endif
