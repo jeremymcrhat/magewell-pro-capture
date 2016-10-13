@@ -1,9 +1,12 @@
 #include "common.h"
 #include "devices.h"
 #include "dev_support.h"
-#include "video.h"
 #include "irq-control.h"
 #include "ds28e01.h"
+#include "gpio.h"
+#include "spi_master_controller.h"
+#include "flash.h"
+#include "i2c-master.h"
 
 
 /* take first free /dev/videoX indexes by default */
@@ -12,12 +15,61 @@ static unsigned int video_nr[] = {[0 ... (NUM_INPUTS - 1)] = -1 };
 module_param_array(video_nr, int, NULL, 0444);
 MODULE_PARM_DESC(video_nr, "video devices numbers array");
 
+int video_init(struct mag_cap_dev *dev, int *video_nr);
+
 
 static irqreturn_t capture_irq_handler(int irq, void *dev_id)
 {
 	/* read IRQ status */
 	
 	return IRQ_HANDLED;
+}
+
+
+void xi_linx_dna_get_dna(struct mag_cap_dev *mdev, u32 key, u32 *dna_high, u32 *dna_low)
+{
+    pci_write_reg32(mdev->dna_addr + DNA_REG_ADDR_DNA_LOW, key);
+    if (NULL != dna_low)
+        *dna_low = pci_read_reg32(mdev->dna_addr + DNA_REG_ADDR_DNA_LOW);
+    if (NULL != dna_high)
+        *dna_high = pci_read_reg32(mdev->dna_addr + DNA_REG_ADDR_DNA_HIGH);
+
+    pci_write_reg32(mdev->dna_addr + DNA_REG_ADDR_DNA_LOW, 0);
+}
+
+void xi_linx_dna_authenticate(struct mag_cap_dev *mdev, u32 hash)
+{
+    pci_write_reg32(mdev->dna_addr + DNA_REG_ADDR_COMPARE, hash);
+}
+
+bool xi_linx_dna_is_auth_passed(struct mag_cap_dev *mdev)
+{
+    return (pci_read_reg32(mdev->dna_addr + DNA_REG_ADDR_STATUS) & 0x02) != 0;
+}
+
+
+static void authenticate_video(struct mag_cap_dev *mdev)
+{
+
+	u8 activation_mark[8];
+	const u8 activation_mark_compare[] = { 'M', 'A', 'G', 'E', 'W', 'E', 'L', 'L' };
+	u8 active_code[8] = { 0 };
+
+	/*check that the ds28e01 is present ? */
+	/* have we already completed the authorization? */
+	ds28e01_read_memory(&mdev->ds28e01, activation_mark, 24, 8);
+	if (memcmp(activation_mark, activation_mark_compare, 8) != 0) {
+		dev_err(&mdev->pci->dev, " Authentication failed! \n");
+		return;
+	}
+	else {
+		u8 auth = ds28e01_authenticate(&mdev->ds28e01);
+		dev_dbg(&mdev->pci->dev, "DS28E01 Auth: %d \n", auth);
+	}
+
+	ds28e01_read_memory(&mdev->ds28e01, active_code, 0x10, 8);
+	xi_linx_dna_authenticate(mdev, *(u32 *)(&active_code[0]));
+	xi_linx_dna_authenticate(mdev, *(u32 *)(&active_code[4]));
 }
 
 void read_serial_num(struct mag_cap_dev *mdev, char *serial_no)
@@ -42,7 +94,7 @@ static int magwell_probe(struct pci_dev *pci_dev,
 			const struct pci_device_id *pci_id)
 {
 	int ret = 0;
-	u32 hw_version, firmware_version;
+	u32 hw_version, firmware_version, prod_id;
 	u32 timeout_wait = 1000;
 	char serial_num[SERIAL_NO_LEN] = { 0 };
 
@@ -50,7 +102,7 @@ static int magwell_probe(struct pci_dev *pci_dev,
 
 	dev_info(&pci_dev->dev, "probe enter!\n");
 
-	dev = devm_kzalloc(&pci_dev->dev, sizeof(*dev), GFP_KERNEL);
+	dev = devm_kzalloc(&pci_dev->dev, sizeof(struct mag_cap_dev), GFP_KERNEL);
 	if(!dev)
 		return -ENOMEM;
 
@@ -93,25 +145,57 @@ static int magwell_probe(struct pci_dev *pci_dev,
 		goto release_mmio;
 	}
 
+	printk(" MMIO Address for bar: 0x%lx \n", (unsigned long) dev->mmio);
+
+	//pci_set_drvdata(pci_dev, dev);  //do i really need this?
+
 	spin_lock_init(&dev->slock);
 
 	hw_version = pci_read_reg32(dev->mmio + REG_ADDR_HARDWARE_VER);
 	firmware_version = pci_read_reg32(dev->mmio + REG_ADDR_FIRMWARE_VER);
 	dev_info(&pci_dev->dev, " Hardware version: 0x%x \n", hw_version);
 	dev_info(&pci_dev->dev, " Firmware version: 0x%x \n", firmware_version);
+	prod_id = (pci_read_reg32(dev->mmio + REG_ADDR_PRODUCT_ID));
+
+	dev_info(&pci_dev->dev, " Product ID: 0x%x \n", prod_id);
+
+	printk(" Prod ID with mask: 0x%x \n", prod_id & 0xFFFF);
+	/* Currently only tested on QUAD HDMI */
+	switch (prod_id) {
+		/* TODO: Fill in the table later as more are tested */
+		case MWCAP_PROD_ID_AIO:
+		case MWCAP_PROD_ID_DVI:
+		case MWCAP_PROD_ID_HDMI:
+		case MWCAP_PROD_ID_SDI:
+		case MWCAP_PROD_ID_DUALSDI:
+		case MWCAP_PROD_ID_DUALDVI:
+		case MWCAP_PROD_ID_DUALHDMI:
+		case MWCAP_PROD_ID_QUADSDI:
+			break;
+		case MWCAP_PROD_ID_QUADHDMI:
+			/* Quad HDMI, I2C, multi ch, FRONT_END_ADV761X, m_bHasPI7C9X2GX08 , GPIO_MASK_ADV_INT_N */
+			dev->has_i2c = true;
+			dev->multi_ch = true;
+			dev->has_PI7C9X2GX08 = true;
+			dev->gpio_intr_mask = GPIO_MASK_ADV_INT_N;
+			sprintf(dev->name, "%s-%s", VIDEO_CAP_DRIVER_NAME, "QUADHDMI");
+			break;
+		default:
+			dev_info(&pci_dev->dev, "Error product ID is unknown \n");
+			return -ENODEV;
+	};
+	
+
 
 	dev->irq_ctrl = dev->mmio + IRQ_BASE_ADDR;
-	printk(" IRQ status before 0x%x \n", xi_irq_get_enabled_status(dev));
-	printk(" disabling IRQs \n");
+	printk(" IRQ status before 0x%x \n", irq_get_enabled_status(dev));
 	/* Disable all IRQs */
-	xi_irq_set_control(dev, 1);
+	irq_set_control(dev, 1);
 
-	printk(" enabling irqs when ready \n");
 	/*enable irq when item ready*/
-	xi_irq_set_enable_bits_value(dev, 0);
-	dev_dbg(&pci_dev->dev, " finished enabling bits \n");
+	irq_set_enable_bits_value(dev, 0);
 
-	printk(" IRQ status after 0x%x \n", xi_irq_get_enabled_status(dev));
+	//printk(" IRQ status after 0x%x \n", irq_get_enabled_status(dev));
 
 /**** TODO: double check security *****/
 
@@ -143,18 +227,97 @@ static int magwell_probe(struct pci_dev *pci_dev,
 	/* Enable MSI TODO */
 	//enable_pci_msi(....)
 
-	pci_set_drvdata(pci_dev, dev);
+	/* Authenticate or else captured frames will be black */
+	authenticate_video(dev);
 
-	/* Initialize card */
-	ret = video_init(dev, video_nr);
+	
+	/* spi */
+	dev->freq_clk = pci_read_reg32(dev->mmio + REG_ADDR_REF_CLK_FREQ);
+	//dev_info(&pci_dev->dev, "  Frequency: 0x%lu \n", dev->freq_clk);
+
+	printk(" setting spi->reg_base \n");
+	dev->spi.reg_base = dev->mmio + SPI_BASE_ADDR;
+	printk(" calling xi_spi_init \n");	
+	xi_spi_init(&dev->spi, (dev->mmio + SPI_BASE_ADDR),
+		dev->freq_clk, SPI_SYS_FREQ_SPI, SPI_WIDTH_8);
+    	// Fix Xilinx STARTUPE2 clock problem (Lost first 2 pulse after configuration)
+	xi_spi_set_chip_select(&dev->spi, 0x00);
+	xi_spi_write(&dev->spi, 0);
+
+	xi_qspiflash_micron_init(&dev->xi_flash, &dev->spi, 0x01);
+	dev_dbg(&pci_dev->dev, "SPI Signature: %04X\n",
+            xi_qspiflash_micron_read_jedecid(&dev->xi_flash));
+
+	/* gpio */
+	xi_gpio_init(&dev->xi_gpio, dev->mmio + GPIO_BASE_ADDR);
+	xi_gpio_set_intr_trigger_mode(&dev->xi_gpio,
+            (GPIO_INTR_TRIG_MODE_CHANGE << GPIO_ID_SDI_RX_LOCKED)
+            | (GPIO_INTR_TRIG_MODE_EVENT << GPIO_ID_ADV_INT_N)
+            );
+	xi_gpio_set_intr_trigger_type(&dev->xi_gpio, (GPIO_INTR_TRIG_TYPE_LEVEL << GPIO_ID_ADV_INT_N));
+	xi_gpio_set_intr_trigger_value(&dev->xi_gpio, (GPIO_INTR_TRIG_VALUE_LOW << GPIO_ID_ADV_INT_N));
+	xi_gpio_set_intr_enable_bits_value(&dev->xi_gpio, dev->gpio_intr_mask);
+    
+	if (dev->has_i2c) {
+		dev_dbg(&pci_dev->dev, "I2C init started\n");
+		ret = xi_i2c_master_init(&dev->i2c_master, dev->mmio + I2C_BASE_ADDR, dev->freq_clk, SYS_FREQ_I2C);
+		if (ret) {
+			dev_dbg(&pci_dev->dev, "Error setting i2c master\n");
+			return ret;
+		}
+		irq_set_enable_bits(dev, IRQ_MASK_I2C);
+	}
+
+
+	/* timestamp init */
+	/* Steps:
+	 *  1) timestamp_init
+	 *  2) timestamp_set_time
+	 *  3) timestamp_set_alarm_time
+	 *  4) enable IRQ bits
+	 */
+
+	/* init audio */
+	//xi_pcie_ring_dma_controller_init(&priv->aud_dma_ctrl, reg_base+AUD_DMA_BASE_ADDR);
+	//
+	dev->vpp_dma_ctrl[0].reg_base = dev->mmio + VPP1_DMA_BASE_ADDR;
+	dev->vpp_dma_ctrl[1].reg_base = dev->mmio + VPP2_DMA_BASE_ADDR;
+	dev->upload_dma_ctrl.reg_base = dev->mmio + UPLOAD_DMA_BASE_ADDR;
+	dev->vpp_memory_writer[0].reg_base = dev->mmio + VPP1_MWR_DMA_BASE_ADDR;
+	dev->vpp_memory_writer[1].reg_base = dev->mmio + VPP2_MWR_DMA_BASE_ADDR;
+
+
+	dev_dbg(&pci_dev->dev, " Setting IRQ for video\n");
+
+	irq_set_enable_bits(dev, IRQ_MASK_GPIO);
+        irq_set_enable_bits(dev,
+            IRQ_MASK_SYNC_METER |
+            IRQ_MASK_SDI_INPUT |
+            IRQ_MASK_VAD |
+            //IRQ_MASK_AUD_DMA |
+            IRQ_MASK_VPP1_DMA |
+            IRQ_MASK_VPP2_DMA |
+            IRQ_MASK_UPLOAD_DMA |
+            IRQ_MASK_VPP1_MWR_DMA |
+            IRQ_MASK_VPP2_MWR_DMA
+            );
+	
+	
+	/* Initialize video */
+	ret = video_init(dev, video_nr); //video_capture_Initialize
 	if (ret)
 		goto release_mmio;
 
 	/* Enable IRQs */
+	//priv->m_dwVideoCaptureCaps = video_capture_GetCaps(&priv->video_cap);
+	//video_capture_SetIntEnables(&priv->video_cap, priv->video_cap_enabled_int);
+	//irq_set_enable_bits(&priv->irq_ctrl, IRQ_MASK_VID_CAPTURE);
+
+	
 
 	/* request IRQ */
 	ret = devm_request_irq(&pci_dev->dev, pci_dev->irq, capture_irq_handler,
-		IRQF_SHARED, VIDEO_CAP_DRIVER_NAME, dev);
+		IRQF_SHARED, dev->name, dev);
 	if (ret < 0) {
 		dev_err(&dev->pci->dev, "Error requesting IRQ %d \n", pci_dev->irq);
 		pci_dev->irq = -1;
@@ -186,7 +349,7 @@ static void magwell_cleanup(struct pci_dev *pci_dev)
 
 	dev_dbg(&pci_dev->dev, "Cleanup enter!\n");
 	/* shutdown interrupts */
-	xi_irq_set_control(dev, 0);
+	irq_set_control(dev, 0);
 
 	/* unregister */
 	//tw5864_video_fini(dev);

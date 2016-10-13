@@ -9,7 +9,7 @@
 
 /* Driver supports the following capture devices */
 
-#define MAG_PCI_DEV_AIO	0x0002
+#define MAG_PCI_DEV_AIO		0x0002
 #define MAG_PCI_DEV_DVI		0x0003
 #define MAG_PCI_DEV_HDMI	0x0004
 #define MAG_PCI_DEV_SDI		0x0005
@@ -21,6 +21,8 @@
 #define MAG_PCI_DEV_MINIHDMI	0x0011
 #define MAG_PCI_DEV_HDMI4K	0x0012
 #define MAG_PCI_DEV_MINISDI	0x0013
+
+
 
 static const struct pci_device_id magewell_pci_tbl[] = {
 	{ PCI_DEVICE(MAG_VENDOR_ID, MAG_PCI_DEV_AIO) },
@@ -37,5 +39,20 @@ static const struct pci_device_id magewell_pci_tbl[] = {
 	{ PCI_DEVICE(MAG_VENDOR_ID, MAG_PCI_DEV_MINISDI) },
 	{ 0, }
 };
+
+/* Product IDs */
+
+#define MWCAP_PROD_ID_AIO		(0x100 + MAG_PCI_DEV_AIO)
+#define MWCAP_PROD_ID_DVI		(0x100 + MAG_PCI_DEV_DVI)
+#define MWCAP_PROD_ID_HDMI		(0x100 + MAG_PCI_DEV_HDMI)
+#define MWCAP_PROD_ID_SDI		(0x100 + MAG_PCI_DEV_SDI)
+#define MWCAP_PROD_ID_DUALSDI		(0x100 + MAG_PCI_DEV_DUALSDI)
+#define MWCAP_PROD_ID_DUALDVI		(0x100 + MAG_PCI_DEV_DUALDVI)
+#define MWCAP_PROD_ID_DUALHDMI		(0x100 + MAG_PCI_DEV_DUALHDMI)
+#define MWCAP_PROD_ID_QUADSDI		(0x100 + MAG_PCI_DEV_QUADSDI)
+#define MWCAP_PROD_ID_QUADHDMI		(0x100 + MAG_PCI_DEV_QUADHDMI)
+#define MWCAP_PROD_ID_MINIHDMI		(0x100 + MAG_PCI_DEV_MINIHDMI)
+#define MWCAP_PROD_ID_HDMI4K		(0x100 + MAG_PCI_DEV_HDMI4K)
+#define MWCAP_PROD_ID_MINISDI		(0x100 + MAG_PCI_DEV_MINISDI)
 
 #endif

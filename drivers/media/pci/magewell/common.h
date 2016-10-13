@@ -9,6 +9,8 @@
 #ifndef __COMMON_H
 #define __COMMON_H
 
+#define DEBUG
+
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -26,16 +28,20 @@
 #include <linux/version.h>
 #include <linux/notifier.h>
 #include <linux/io.h>
+#include <linux/device.h>
 
 
 #include <linux/videodev2.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-common.h>
+#include <media/v4l2-event.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
+#include <media/videobuf2-dma-contig.h>
 #include <media/videobuf2-dma-sg.h>
 
+#include <linux/crc16.h>
 
 #define VERSION_STRING	"v1.2.0"
 
@@ -66,6 +72,10 @@ static inline uint32_t pci_read_reg32(volatile void *addr) {
 static inline void pci_write_reg32(volatile void *addr, uint32_t val) {
 	writel(val, addr);
 }
+
+#define SPI_WIDTH_8	1
+#define SPI_WIDTH_16	2
+#define SPI_WIDTH_32	4
 
 #define SERIAL_NO_LEN	16
 
