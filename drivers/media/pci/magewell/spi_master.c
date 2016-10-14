@@ -22,16 +22,15 @@ void xi_spi_init(struct spi_master_controller *spi,
 	if (spi == NULL)
 		printk(" %s SPI is NULL \n", __func__);
 
-    pci_write_reg32(&spi->reg_base+SPI_REG_ADDR_CONFIG, (bits_width & 0x07) | ((clock_half_div & 0xFFF) << 4));
+    pci_write_reg32(spi->reg_base+SPI_REG_ADDR_CONFIG, (bits_width & 0x07) | ((clock_half_div & 0xFFF) << 4));
 }
 
 void xi_spi_set_chip_select(struct spi_master_controller *spi, u32 masks)
 {
-    u32 chip_select = pci_read_reg32(&spi->reg_base+SPI_REG_ADDR_CHIP_SELECT);
+    u32 chip_select = pci_read_reg32(spi->reg_base+SPI_REG_ADDR_CHIP_SELECT);
 
     chip_select &= ~masks;
-
-    pci_write_reg32(&spi->reg_base+SPI_REG_ADDR_CHIP_SELECT, chip_select);
+    pci_write_reg32(spi->reg_base+SPI_REG_ADDR_CHIP_SELECT, chip_select);
 }
 
 void xi_spi_clear_chip_select(struct spi_master_controller *spi, u32 masks)

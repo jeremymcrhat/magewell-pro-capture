@@ -90,6 +90,7 @@ u32 xi_qspiflash_micron_read_jedecid(struct xi_qspiflash_micron *flash)
     manufacturerid = (u8)xi_spi_read(flash->spi);
     memorytypeid = (u8)xi_spi_read(flash->spi);
     capacityid = (u8)xi_spi_read(flash->spi);
+printk(" %s Manufacturer: %d MemID %d Cap %d \n", __func__, manufacturerid, memorytypeid, capacityid);
     xi_spi_clear_chip_select(flash->spi, flash->select_mask);
 
     return ((u32)manufacturerid << 16) | ((u32)memorytypeid << 8) | capacityid;
