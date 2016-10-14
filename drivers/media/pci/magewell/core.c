@@ -145,8 +145,6 @@ static int magwell_probe(struct pci_dev *pci_dev,
 		goto release_mmio;
 	}
 
-	printk(" MMIO Address for bar: 0x%lx \n", (unsigned long) dev->mmio);
-
 	//pci_set_drvdata(pci_dev, dev);  //do i really need this?
 
 	spin_lock_init(&dev->slock);
