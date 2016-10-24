@@ -16,6 +16,7 @@ module_param_array(video_nr, int, NULL, 0444);
 MODULE_PARM_DESC(video_nr, "video devices numbers array");
 
 int video_init(struct mag_cap_dev *dev, int *video_nr);
+void tw5864_video_fini(struct mag_cap_dev *dev);
 
 
 static irqreturn_t capture_irq_handler(int irq, void *dev_id)
@@ -343,16 +344,18 @@ static void magwell_cleanup(struct pci_dev *pci_dev)
 	struct v4l2_device *v4l2_dev = pci_get_drvdata(pci_dev);
 	struct mag_cap_dev *dev =
 		container_of(v4l2_dev, struct mag_cap_dev, v4l2_dev);
+	unsigned long flags;
 
 
 	dev_dbg(&pci_dev->dev, "Cleanup enter!\n");
+	spin_lock_irqsave(&dev->slock, flags);
 	/* shutdown interrupts */
 	irq_set_control(dev, 0);
+	spin_unlock_irqrestore(&dev->slock, flags);
 
 	/* unregister */
-	//tw5864_video_fini(dev);
+	tw5864_video_fini(dev);
 
-	devm_free_irq(&pci_dev->dev, pci_dev->irq, pci_dev);
 	/* release resources */
 	iounmap(dev->mmio);
 	release_mem_region(pci_resource_start(pci_dev, 0),
