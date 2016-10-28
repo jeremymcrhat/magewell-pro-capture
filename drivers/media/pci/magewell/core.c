@@ -7,6 +7,7 @@
 #include "spi_master_controller.h"
 #include "flash.h"
 #include "i2c-master.h"
+#include "video.h"
 
 
 /* take first free /dev/videoX indexes by default */
@@ -309,8 +310,15 @@ static int magwell_probe(struct pci_dev *pci_dev,
 
 	/* Enable IRQs */
 	//priv->m_dwVideoCaptureCaps = video_capture_GetCaps(&priv->video_cap);
-	//video_capture_SetIntEnables(&priv->video_cap, priv->video_cap_enabled_int);
-	//irq_set_enable_bits(&priv->irq_ctrl, IRQ_MASK_VID_CAPTURE);
+	dev->vid_cap_addr = dev->mmio + VID_CAPTURE_BASE_ADDR;
+
+	dev->video_cap_enabled_int = VPP_INT_MASK_VFS_OVERFLOW | VPP_INT_MASK_INPUT_LOST_SYNC
+		| VPP_INT_MASK_INPUT_NEW_FIELD | VPP_INT_MASK_VFS_FULL_FIELD_DONE
+		| VPP_INT_MASK_VFS_QUARTER_FRAME_DONE | VPP_INT_MASK_VPP_WB_FBWR_DONE
+		| VPP_INT_MASK_VPP1_FBRD_DONE | VPP_INT_MASK_VPP2_FBRD_DONE;
+
+	video_capture_SetIntEnables(dev, dev->video_cap_enabled_int);
+	irq_set_enable_bits(dev, IRQ_MASK_VID_CAPTURE);
 
 	
 

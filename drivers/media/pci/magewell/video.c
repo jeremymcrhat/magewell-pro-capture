@@ -4,6 +4,7 @@
 
 #include "common.h"
 #include "dev_support.h"
+#include "video.h"
 
 
 static int tw5864_video_input_init(struct tw5864_input *dev, int video_nr);
@@ -141,6 +142,13 @@ static int tw5864_g_std(struct file *file, void *priv, v4l2_std_id *std)
 
         *std = input->v4l2_std;
         return 0;
+}
+
+
+void video_capture_SetIntEnables(struct mag_cap_dev *mdev,
+				unsigned long enable_bits)
+{
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INT_ENABLE, enable_bits);
 }
 
 

@@ -138,6 +138,7 @@ struct tw5864_input {
 };
 
 
+
 struct mag_cap_dev {
 	spinlock_t slock; /* used for sync between ISR, tasklet & V4L2 API */
 	void __iomem *reg_base; /* pointer to mapped registers memory */
@@ -175,6 +176,8 @@ struct mag_cap_dev {
 	unsigned long freq_clk;
 	struct xi_qspiflash_micron xi_flash;
 	struct xi_i2c_master i2c_master;
+	void __iomem *vid_cap_addr;
+	u32 video_cap_enabled_int;
 	
 };
 
