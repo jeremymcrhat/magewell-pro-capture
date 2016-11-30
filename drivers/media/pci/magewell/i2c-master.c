@@ -12,6 +12,7 @@ enum REG_ADDR {
     REG_ADDR_RESPONSE			= 4 * 4
 };
 
+
 enum I2C_REQUEST {
     I2C_REQ_DELAY				= 0x03000000, // 0011
     I2C_REQ_START_WRITE			= 0x01000000, // 0001
@@ -29,11 +30,6 @@ enum I2C_REQUEST {
     I2C_REQ_INTERRUPT			= 0x80000000
 };
 
-enum I2C_RESPONSE {
-    I2C_RES_ACK					= 0x20000000,
-    I2C_RES_BUSY                = 0x40000000,
-    I2C_RES_INTERRUPT			= 0x80000000
-};
 
 int xi_i2c_master_init(struct xi_i2c_master *master,
         volatile void __iomem *reg_base, uint32_t clk_freq, uint32_t bitrate)
@@ -46,25 +42,35 @@ int xi_i2c_master_init(struct xi_i2c_master *master,
     master->bitrate  = bitrate;
 
 #if 0
-    //master->cmd_done = os_event_alloc();
-    if (master->cmd_done == NULL)
-        return -ENO_MEM;
-    //master->mutex = os_mutex_alloc();
+    master->cmd_done = os_event_alloc();
+    if (master->cmd_done == NULL) {
+	printk(" %s error alloc cmd_done \n", __func__);
+        return -ENOMEM;
+    }
+    master->mutex = os_mutex_alloc();
     if (master->mutex == NULL) {
+	printk(" %s error allocating mutex \n", __func__);
         os_event_free(master->cmd_done);
         master->cmd_done = NULL;
-        return -ENO_MEM;
+        return -ENOMEM;
     }
 #endif
-
     clk_half_div = clk_freq / (2 * bitrate) - 1;
 
     pci_write_reg32(master->reg_base+REG_ADDR_CONFIG, clk_half_div);
 
     ver_caps = pci_read_reg32(master->reg_base+REG_ADDR_VER_CAPS);
     master->is_version2 = ((ver_caps >> 28) >= 2);
+    printk(" Which version ? ");
+    if (master->is_version2)
+	printk(" 2 \n");
+    else
+	printk(" 1\n");
 
     master->response = 0;
+    master->m_i2c_ch = 0;
+
+    mutex_init(&master->lock);
 
     return 0;
 }
@@ -83,29 +89,6 @@ void xi_i2c_master_deinit(struct xi_i2c_master *master)
     master->mutex = NULL;
 }
 
-static uint32_t i2c_master_wait_cmd_done(struct xi_i2c_master *master)
-{
-    u32 response = 0;
-
-    if (os_event_wait(master->cmd_done, 500) <= 0) {
-        os_print_err("i2c timeout\n");
-    } else {
-        if ((master->response & I2C_RES_BUSY) == 0) {
-            os_event_clear(master->cmd_done);
-            return master->response;
-        }
-    }
-
-    response = pci_read_reg32(master->reg_base+REG_ADDR_RESPONSE);
-    while (response & I2C_RES_BUSY) {
-        os_msleep(1);
-        response = pci_read_reg32(master->reg_base+REG_ADDR_RESPONSE);
-    }
-
-    os_event_clear(master->cmd_done);
-    return response;
-}
-
 void xi_i2c_master_irq_handler_top(struct xi_i2c_master *master)
 {
     pci_write_reg32(master->reg_base+REG_ADDR_RESPONSE, I2C_RES_INTERRUPT);
@@ -122,7 +105,6 @@ static int xi_i2c_master_read_v1(struct xi_i2c_master *master,
 {
     uint32_t response;
 
-    os_event_clear(master->cmd_done);
 
     pci_write_reg32(master->reg_base+REG_ADDR_MUX_MASK, 1 << ch);
 
@@ -153,7 +135,6 @@ static int xi_i2c_master_write_v1(struct xi_i2c_master *master,
 {
     uint32_t response;
 
-    os_event_clear(master->cmd_done);
     
     pci_write_reg32(master->reg_base+REG_ADDR_MUX_MASK, 1 << ch);
 
@@ -180,7 +161,6 @@ static int xi_i2c_master_read_regs_v1(struct xi_i2c_master *master,
 {
     uint32_t response;
 
-    os_event_clear(master->cmd_done);
 
     pci_write_reg32(master->reg_base+REG_ADDR_MUX_MASK, 1 << ch);
 
@@ -214,7 +194,6 @@ static int xi_i2c_master_write_regs_v1(struct xi_i2c_master *master,
 {
     uint32_t response;
 
-    os_event_clear(master->cmd_done);
 
     pci_write_reg32(master->reg_base+REG_ADDR_MUX_MASK, 1 << ch);
 
@@ -239,12 +218,28 @@ static int xi_i2c_master_write_regs_v1(struct xi_i2c_master *master,
     return 0;
 }
 
+#endif
+
+
+
+static uint32_t i2c_master_wait_cmd_done(struct xi_i2c_master *master)
+{
+    u32 response = 0;
+    u16 attempts = 500;
+
+    response = pci_read_reg32(master->reg_base+REG_ADDR_RESPONSE);
+    while ((response & I2C_RES_BUSY) && (attempts--)) {
+        msleep(1);
+        response = pci_read_reg32(master->reg_base+REG_ADDR_RESPONSE);
+    }
+
+    return response;
+}
+
 static int xi_i2c_master_read_v2(struct xi_i2c_master *master,
         int ch, uint8_t devaddr, uint8_t regaddr, uint8_t *val)
 {
     uint32_t response;
-
-    os_event_clear(master->cmd_done);
 
     pci_write_reg32(master->reg_base+REG_ADDR_MUX_MASK, 1 << ch);
 
@@ -264,8 +259,6 @@ static int xi_i2c_master_write_v2(struct xi_i2c_master *master,
 {
     uint32_t response;
 
-    os_event_clear(master->cmd_done);
-
     pci_write_reg32(master->reg_base+REG_ADDR_MUX_MASK, 1 << ch);
 
     pci_write_reg32(master->reg_base+REG_ADDR_REQUEST,
@@ -284,8 +277,6 @@ static int xi_i2c_master_read_regs_v2(struct xi_i2c_master *master,
 
     if (count <= 0)
         return -1;
-
-    os_event_clear(master->cmd_done);
 
     pci_write_reg32(master->reg_base+REG_ADDR_MUX_MASK, 1 << ch);
 
@@ -317,8 +308,7 @@ static int xi_i2c_master_write_regs_v2(struct xi_i2c_master *master,
     if (count <= 0)
         return -1;
 
-    os_event_clear(master->cmd_done);
-
+    
     pci_write_reg32(master->reg_base+REG_ADDR_MUX_MASK, 1 << ch);
 
     pci_write_reg32(master->reg_base+REG_ADDR_REQUEST,
@@ -347,14 +337,9 @@ int xi_i2c_master_read(struct xi_i2c_master *master,
         int ch, uint8_t devaddr, uint8_t regaddr, uint8_t *val)
 {
     int ret = -1;
-
-    os_mutex_lock(master->mutex);
-    if (master->is_version2)
+    mutex_lock(&master->lock);
         ret = xi_i2c_master_read_v2(master, ch, devaddr, regaddr, val);
-    else
-        ret = xi_i2c_master_read_v1(master, ch, devaddr, regaddr, val);
-    os_mutex_unlock(master->mutex);
-
+    mutex_unlock(&master->lock);
     return ret;
 }
 
@@ -363,13 +348,9 @@ int xi_i2c_master_write(struct xi_i2c_master *master,
 {
     int ret = -1;
 
-    os_mutex_lock(master->mutex);
-    if (master->is_version2)
+    mutex_lock(&master->lock);
         ret = xi_i2c_master_write_v2(master, ch, devaddr, regaddr, val);
-    else
-        ret = xi_i2c_master_write_v1(master, ch, devaddr, regaddr, val);
-    os_mutex_unlock(master->mutex);
-
+    mutex_unlock(&master->lock);
     return ret;
 }
 
@@ -378,13 +359,9 @@ int xi_i2c_master_read_regs(struct xi_i2c_master *master,
 {
     int ret = -1;
 
-    os_mutex_lock(master->mutex);
-    if (master->is_version2)
+    mutex_lock(&master->lock);
         ret = xi_i2c_master_read_regs_v2(master, ch, devaddr, regaddr, data, count);
-    else
-        ret = xi_i2c_master_read_regs_v1(master, ch, devaddr, regaddr, data, count);
-    os_mutex_unlock(master->mutex);
-
+    mutex_unlock(&master->lock);
     return ret;
 }
 
@@ -392,15 +369,48 @@ int xi_i2c_master_write_regs(struct xi_i2c_master *master,
         int ch, uint8_t devaddr, uint8_t regaddr, uint8_t *data, short count)
 {
     int ret = -1;
-
-    os_mutex_lock(master->mutex);
-    if (master->is_version2)
-        ret = xi_i2c_master_write_regs_v2(master, ch, devaddr, regaddr, data, count);
-    else
-        ret = xi_i2c_master_write_regs_v1(master, ch, devaddr, regaddr, data, count);
-    os_mutex_unlock(master->mutex);
-
+    mutex_lock(&master->lock);
+    ret = xi_i2c_master_write_regs_v2(master, ch, devaddr, regaddr, data, count);
+    mutex_unlock(&master->lock);
     return ret;
 }
 
-#endif
+static inline int adv761x_i2c_write(struct xi_i2c_master *dev,
+        uint8_t devaddr, uint8_t regaddr, uint8_t val)
+{
+    return xi_i2c_master_write(dev, dev->m_i2c_ch, devaddr, regaddr, val);
+}
+
+static inline u8 adv761x_i2c_read(struct xi_i2c_master *dev,
+        uint8_t devaddr, uint8_t regaddr)
+{
+    u8 val = 0;
+
+    xi_i2c_master_read(dev, dev->m_i2c_ch, devaddr, regaddr, &val);
+
+    return val;
+}
+
+void adv761x_write_regs(struct xi_i2c_master *dev,
+        const REGISTER_ITEM * pItems, int cItems)
+{
+    int i;
+
+    for (i = 0; i < cItems; i++) {
+        adv761x_i2c_write(dev, pItems->devaddr, pItems->regaddr, pItems->value);
+        pItems++;
+    }
+}
+
+u8 adv761x_i2c_read_regs(struct xi_i2c_master *dev,
+        uint8_t devaddr, uint8_t regaddr, uint8_t *data, short count)
+{
+	u8 ret = 0;
+
+	ret = xi_i2c_master_read_regs(dev, dev->m_i2c_ch, devaddr, regaddr,
+            data, count);
+
+	return ret;
+}
+
+

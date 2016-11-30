@@ -7,8 +7,8 @@
 
 #include "common.h"
 
-#define H264_BUF_CNT 1
-#define NUM_INPUTS H264_BUF_CNT
+#define H264_BUF_CNT 4
+#define NUM_INPUTS 1 //only 1 input for now
 
 #define VIDEO_CAP_DRIVER_NAME "Pro_Capture"
 
@@ -32,14 +32,15 @@ struct ds28e01_device {
 	volatile void __iomem *reg_base;
 };
 
-struct pcie_dma_controller {
-	volatile void __iomem *reg_base;
-};
 
 struct pcie_memory_writer {
 	volatile void __iomem *reg_base;
 };
 
+
+struct pcie_dma_controller {
+	                volatile void __iomem *reg_base;
+};
 
 struct xi_gpio {
     volatile void __iomem *reg_base;
@@ -62,6 +63,9 @@ struct xi_i2c_master {
     unsigned int                bitrate;
     bool                        is_version2;
     unsigned int                response;
+    int                         m_i2c_ch;
+    struct mutex		lock;
+
 };
 
 struct magdev_h264_frame {
@@ -89,6 +93,16 @@ enum tw5864_vid_std {
 };
 
 
+
+enum resolution {
+        D1 = 1,
+        HD1 = 2, /* half d1 - 360x(240|288) */
+        CIF = 3,
+        QCIF = 4,
+};
+
+
+
 struct tw5864_input {
         int nr; /* input number */
         struct mag_cap_dev *root;
@@ -98,7 +112,7 @@ struct tw5864_input {
         struct v4l2_ctrl_handler hdl;
         struct vb2_queue vidq;
         struct list_head active;
-        //enum resolution resolution;
+        enum resolution resolution;
         unsigned int width, height;
         unsigned int frame_seqno;
         unsigned int frame_gop_seqno;
@@ -137,7 +151,7 @@ struct tw5864_input {
         unsigned long new_frame_deadline;
 };
 
-
+typedef void * os_dma_par_t;
 
 struct mag_cap_dev {
 	spinlock_t slock; /* used for sync between ISR, tasklet & V4L2 API */
@@ -178,7 +192,8 @@ struct mag_cap_dev {
 	struct xi_i2c_master i2c_master;
 	void __iomem *vid_cap_addr;
 	u32 video_cap_enabled_int;
-	
+	void *parent_dev;
+	os_dma_par_t dma_priv;	
 };
 
 
@@ -254,5 +269,87 @@ enum DS28E01_REG_ADDR {
 #define DNA_REG_ADDR_KEY	(3 * 4)
 #define DNA_REG_ADDR_COMPARE	(4 * 4)
 
+
+typedef struct _REGISTER_ITEM {
+	u8 devaddr;
+	u8 regaddr;
+	u8 value;
+} REGISTER_ITEM, *PREGISTER_ITEM;
+
+
+/* Initialization data */
+static const REGISTER_ITEM g_regItemsInit[] = {
+    { 0x98, 0xF4, 0x80, }, // CEC
+	{ 0x98, 0xF5, 0x7C, }, // INFOFRAME
+	{ 0x98, 0xF8, 0x4C, }, // DPLL
+	{ 0x98, 0xF9, 0x64, }, // KSV
+	{ 0x98, 0xFA, 0x6C, }, // EDID
+	{ 0x98, 0xFB, 0x68, }, // HDMI
+	{ 0x98, 0xFD, 0x44, }, // CP
+
+	{ 0x68, 0xC0, 0x03, }, // ADI Required Write
+
+	{ 0x98, 0x01, 0x06, }, // Prim_Mode =110b HDMI-GR 
+	{ 0x98, 0x02, 0xF2, }, // RGB Output
+	{ 0x98, 0x03, 0x41, }, // 30-bit 4:4:4 SDR Mode 
+	{ 0x98, 0x05, 0x28, }, // AV Codes Off
+	{ 0x98, 0x06, 0xA6, }, // Positive HS/VS
+	{ 0x98, 0x0C, 0x42, }, // Power up part
+	{ 0x98, 0x15, 0x80, }, // Disable Tristate of Pins
+	{ 0x98, 0x19, 0x83, }, // LLC DLL phase
+	{ 0x98, 0x33, 0x40, }, // LLC DLL enable
+
+	{ 0x44, 0xBA, 0x01, }, // Set HDMI FreeRun
+	{ 0x44, 0x6C, 0x00, }, // ADI Required Write	
+	{ 0x64, 0x40, 0x81, }, // Disable HDCP 1.1 features
+	{ 0x4C, 0xB5, 0x01, }, // Setting MCLK to 256Fs
+
+	{ 0x68, 0xC0, 0x03, }, // ADI Required Write
+	{ 0x68, 0x00, 0x08, }, // Set HDMI Input Port A	
+	{ 0x68, 0x1B, 0x08, }, // ADI Required Write
+	{ 0x68, 0x45, 0x04, }, // ADI Required Write
+	{ 0x68, 0x97, 0xC0, }, // ADI Required Write
+	{ 0x68, 0x3D, 0x10, }, // ADI Required Write
+	{ 0x68, 0x3E, 0x69, }, // ADI Required Write
+	{ 0x68, 0x3F, 0x46, }, // ADI Required Write
+	{ 0x68, 0x4E, 0xFE, }, // ADI Required Write
+	{ 0x68, 0x4F, 0x08, }, // ADI Required Write
+	{ 0x68, 0x50, 0x00, }, // ADI Required Write
+	{ 0x68, 0x57, 0xA3, }, // ADI Required Write
+	{ 0x68, 0x58, 0x07, }, // ADI Required Write
+	{ 0x68, 0x6F, 0x08, }, // ADI Required Write
+	{ 0x68, 0x84, 0x03, }, // ADI Required Write
+	{ 0x68, 0x85, 0x10, }, // ADI Required Write, 480I, 576I, 480P AND 576P: 0x11
+	{ 0x68, 0x86, 0x9B, }, // ADI Required Write
+	{ 0x68, 0x89, 0x03, }, // ADI Required Write
+	{ 0x68, 0x9B, 0x03, }, // ADI Required Write
+	{ 0x68, 0x93, 0x03, }, // ADI Required Write
+	{ 0x68, 0x5A, 0x80, }, // ADI Required Write
+	{ 0x68, 0x9C, 0x80, }, // ADI Required Write
+	{ 0x68, 0x9C, 0xC0, }, // ADI Required Write
+	{ 0x68, 0x9C, 0x00, }, // ADI Required Write
+
+	{ 0x68, 0x03, 0xD8, }, // I2SOUTMODE=2, Left justified, I2SBITWIDTH=0x18
+	{ 0x68, 0x14, 0x1F, }, // Disable MT_MSK_COMPRS_AUD
+
+	{ 0x64, 0x74, 0x00, }, // Disable EDID
+	{ 0x64, 0x7A, 0x06, }, // Disable Auto EDID
+
+	{ 0x68, 0x01, 0x00, }, // Manual Termination
+	{ 0x68, 0x47, 0x01, }, // ALWAYS_STORE_INF=1
+	{ 0x68, 0x48, 0x40, }, // Disable Cable Detect Reset
+	{ 0x68, 0x6C, 0xA3, }, // Manual HPA Control
+
+	{ 0x98, 0x40, 0xE1, }, // INTRQ_OP_SEL=01, INTRQ_DUR_SEL=11
+	{ 0x98, 0x64, 0xFF, }, // HDMI_LVL_INT_MASKB_1_REG
+	{ 0x98, 0x69, 0x01, }, // HDMI_LVL_INT_MASKB_2_REG
+	{ 0x98, 0x7D, 0xFF, }, // HDMI_EDG_INT_MASKB_1_REG
+	{ 0x98, 0x82, 0x01, }, // HDMI_EDG_INT_MASKB_2_REG
+	{ 0x98, 0x87, 0x28, }, // HDMI_EDG_INT_MASKB_3_REG
+};
+
+static const int g_cRegItemsInit = ARRAY_SIZE(g_regItemsInit);
+
+#include "pcie-dma-controller.h"
 
 #endif

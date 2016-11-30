@@ -22,7 +22,37 @@ void tw5864_video_fini(struct mag_cap_dev *dev);
 
 static irqreturn_t capture_irq_handler(int irq, void *dev_id)
 {
+
+	struct mag_cap_dev *dev = dev_id;
+	u32 status;
+	u32 response;
+
 	/* read IRQ status */
+	status = irq_get_enabled_status(dev);
+
+	printk(" IRQ_handler: Status=0x%x \n", status);
+	if (status == 0 || status == ~0)
+		return IRQ_HANDLED;
+
+	if (status & IRQ_MASK_I2C) {
+		//call irq i2c handler i2c_master_irq_handler_top
+		printk("   irq_i2c \n");
+		pci_write_reg32(&dev->i2c_master + I2C_REG_ADDR_RESPONSE, I2C_RES_INTERRUPT);
+		response = pci_read_reg32(&dev->i2c_master + I2C_REG_ADDR_RESPONSE);
+		irq_clear_enable_bits(dev, IRQ_MASK_I2C);
+	}
+
+	if (status & IRQ_MASK_GPIO) {
+		printk(" : GPIO IRQ : \n");
+		irq_clear_enable_bits(dev, IRQ_MASK_GPIO);
+	};
+
+	if (status & IRQ_MASK_VID_CAPTURE) {
+		printk(" : vid cap IRQ : \n");
+		irq_clear_enable_bits(dev, IRQ_MASK_VID_CAPTURE);
+	};
+
+	//irq_set_enable_bits(dev, IRQ_MASK_VID_CAPTURE);
 	
 	return IRQ_HANDLED;
 }
@@ -126,7 +156,7 @@ static int magwell_probe(struct pci_dev *pci_dev,
 
 	pci_set_master(pci_dev);
 
-	ret = pci_set_dma_mask(pci_dev, DMA_BIT_MASK(32));
+	ret = pci_set_dma_mask(pci_dev, DMA_BIT_MASK(64));
 	if (ret) {
 		dev_err(&dev->pci->dev, "32bit PCI DMA is not supported\n");
 		goto disable_pci;
@@ -147,6 +177,11 @@ static int magwell_probe(struct pci_dev *pci_dev,
 		goto release_mmio;
 	}
 
+	ret = pci_enable_msi(pci_dev);
+	if (ret == 0) {
+		printk(" MSI enabled \n");
+	}
+
 	//pci_set_drvdata(pci_dev, dev);  //do i really need this?
 
 	spin_lock_init(&dev->slock);
@@ -159,7 +194,7 @@ static int magwell_probe(struct pci_dev *pci_dev,
 
 	dev_info(&pci_dev->dev, " Product ID: 0x%x \n", prod_id);
 
-	printk(" Prod ID with mask: 0x%x \n", prod_id & 0xFFFF);
+	//printk(" Prod ID with mask: 0x%x \n", prod_id & 0xFFFF);
 	/* Currently only tested on QUAD HDMI */
 	switch (prod_id) {
 		/* TODO: Fill in the table later as more are tested */
@@ -185,10 +220,10 @@ static int magwell_probe(struct pci_dev *pci_dev,
 			return -ENODEV;
 	};
 	
-
+	printk(" Product ID with name :: %s \n", dev->name);
 
 	dev->irq_ctrl = dev->mmio + IRQ_BASE_ADDR;
-	printk(" IRQ status before 0x%x \n", irq_get_enabled_status(dev));
+	//printk(" IRQ status before 0x%x \n", irq_get_enabled_status(dev));
 	/* Disable all IRQs */
 	irq_set_control(dev, 1);
 
@@ -269,6 +304,27 @@ static int magwell_probe(struct pci_dev *pci_dev,
 	}
 
 
+	/* Init front end adv761x_create.... */
+	xi_gpio_clear_data_bits(&dev->xi_gpio, GPIO_MASK_ADV_RESET_N);
+	msleep(6);
+	xi_gpio_set_data_bits(&dev->xi_gpio, GPIO_MASK_ADV_RESET_N);
+	msleep(6);
+	
+	adv761x_write_regs(&dev->i2c_master, g_regItemsInit, g_cRegItemsInit);
+
+	dev->vid_cap_addr = dev->mmio + VID_CAPTURE_BASE_ADDR;
+
+	/**** 
+	* 
+	* xi_gpio_clear_data_bits(fadv761x->m_pGPIOMaster, GPIO_MASK_DVI_HPD);
+	* msleep(50);
+	* _ApplyEDIDAndHDCP(fadv761x);
+	* os_msleep(50);
+	* xi_gpio_set_data_bits(fadv761x->m_pGPIOMaster, GPIO_MASK_DVI_HPD);
+	*
+	*/
+
+	
 	/* timestamp init */
 	/* Steps:
 	 *  1) timestamp_init
@@ -286,6 +342,16 @@ static int magwell_probe(struct pci_dev *pci_dev,
 	dev->vpp_memory_writer[0].reg_base = dev->mmio + VPP1_MWR_DMA_BASE_ADDR;
 	dev->vpp_memory_writer[1].reg_base = dev->mmio + VPP2_MWR_DMA_BASE_ADDR;
 
+	//Enable PCIe DMA controller (hard code 0 for now)
+	xi_pcie_dma_controller_enable(&dev->vpp_dma_ctrl[0]);
+
+	
+	/* Initialize video */
+	ret = video_init(dev, video_nr); //video_capture_Initialize
+	if (ret)
+		goto release_mmio;
+
+	/* Enable IRQs */
 
 	dev_dbg(&pci_dev->dev, " Setting IRQ for video\n");
 
@@ -301,16 +367,7 @@ static int magwell_probe(struct pci_dev *pci_dev,
             IRQ_MASK_VPP1_MWR_DMA |
             IRQ_MASK_VPP2_MWR_DMA
             );
-	
-	
-	/* Initialize video */
-	ret = video_init(dev, video_nr); //video_capture_Initialize
-	if (ret)
-		goto release_mmio;
-
-	/* Enable IRQs */
 	//priv->m_dwVideoCaptureCaps = video_capture_GetCaps(&priv->video_cap);
-	dev->vid_cap_addr = dev->mmio + VID_CAPTURE_BASE_ADDR;
 
 	dev->video_cap_enabled_int = VPP_INT_MASK_VFS_OVERFLOW | VPP_INT_MASK_INPUT_LOST_SYNC
 		| VPP_INT_MASK_INPUT_NEW_FIELD | VPP_INT_MASK_VFS_FULL_FIELD_DONE
@@ -319,7 +376,6 @@ static int magwell_probe(struct pci_dev *pci_dev,
 
 	video_capture_SetIntEnables(dev, dev->video_cap_enabled_int);
 	irq_set_enable_bits(dev, IRQ_MASK_VID_CAPTURE);
-
 	
 
 	/* request IRQ */
@@ -361,6 +417,7 @@ static void magwell_cleanup(struct pci_dev *pci_dev)
 	irq_set_control(dev, 0);
 	spin_unlock_irqrestore(&dev->slock, flags);
 
+	mutex_destroy(&dev->i2c_master.lock);
 	/* unregister */
 	tw5864_video_fini(dev);
 

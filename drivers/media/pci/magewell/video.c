@@ -27,25 +27,162 @@ static const struct v4l2_ctrl_ops tw5864_ctrl_ops = {
         .s_ctrl = tw5864_s_ctrl,
 };
 
+//static int xi_open(struct file *file);
+static unsigned int xi_poll(struct file *file, struct poll_table_struct *wait);
+
 static const struct v4l2_file_operations video_fops = {
         .owner = THIS_MODULE,
+        //.open = xi_open,
         .open = v4l2_fh_open,
         .release = vb2_fop_release,
         .read = vb2_fop_read,
+        //.poll = xi_poll,
         .poll = vb2_fop_poll,
         .mmap = vb2_fop_mmap,
         .unlocked_ioctl = video_ioctl2,
 };
+
+
+
+static struct v4l2_frmsize_discrete g_frmsize_array[] = {
+    { 1920, 1200 },
+    { 1920, 1080 },
+    { 1600, 1200 },
+    { 1440, 900 },
+    { 1368, 768 },
+    { 1280, 1024 },
+    { 1280, 960 },
+    { 1280, 800 },
+    { 1280, 720 },
+    { 1024, 768 },
+    { 1024, 576 },
+    { 960, 540 },
+    { 856, 480 },
+    { 800, 600 },
+    { 768, 576 },
+    { 720, 576 },
+    { 720, 480 },
+    { 640, 480 },
+    { 640, 360 },
+};
+
+
+
+struct xi_fmt formats[] = {
+    {   
+        .name     = "4:2:2, packed, YUYV",
+        .fourcc   = V4L2_PIX_FMT_YUYV,
+        .depth    = 16,
+    },
+    {   
+        .name     = "4:2:2, packed, UYVY",
+        .fourcc   = V4L2_PIX_FMT_UYVY,
+        .depth    = 16,
+    },
+    {   
+        .name     = "4:2:0, NV12",
+        .fourcc   = V4L2_PIX_FMT_NV12,
+        .depth    = 12,
+    },
+    {   
+        .name     = "4:2:0, planar, YV12",
+        .fourcc   = V4L2_PIX_FMT_YVU420,
+        .depth    = 12,
+    },
+    {   
+        .name     = "4:2:0, planar, I420",
+        .fourcc   = V4L2_PIX_FMT_YUV420,
+        .depth    = 12,
+    },
+    {   
+        .name     = "RGB24",
+        .fourcc   = V4L2_PIX_FMT_RGB24,
+        .depth    = 24,
+    },
+    {   
+        .name     = "RGB32",
+        .fourcc   = V4L2_PIX_FMT_RGB32,
+        .depth    = 32,
+    },
+    {   
+        .name     = "BGR24",
+        .fourcc   = V4L2_PIX_FMT_BGR24,
+        .depth    = 24,
+    },
+    {
+        .name     = "BGR32",
+        .fourcc   = V4L2_PIX_FMT_BGR32,
+        .depth    = 32,
+    },
+    {
+        .name     = "Greyscale 8 bpp",
+        .fourcc   = V4L2_PIX_FMT_GREY,
+        .depth    = 8,
+    },
+    {
+        .name     = "Greyscale 16 bpp",
+        .fourcc   = V4L2_PIX_FMT_Y16,
+        .depth    = 16,
+    },
+    {
+        .name     = "32-bit, AYUV",
+        .fourcc   = V4L2_PIX_FMT_YUV32,
+        .depth    = 32,
+    },
+};
+
+
+/* default video info */
+struct xi_fmt             *g_def_fmt = &formats[0];
+unsigned int               g_def_width = 720, g_def_height = 480;
+unsigned int               g_def_frame_duration = 400000;
+
+struct xi_stream_v4l2 {
+    struct mutex                v4l2_mutex;
+    unsigned long               generating;
+
+    struct v4l2_sg_buf_queue    vsq;
+    struct list_head            active;
+    /* thread for generating video stream*/
+    struct task_struct          *kthread;
+    long long                   llstart_time;
+    bool                        exit_capture_thread;
+
+    /* vidoe info */
+    struct xi_fmt               *fmt;
+    unsigned int                width, height;
+    unsigned int                stride;
+    unsigned int                image_size;
+    unsigned int                frame_duration;
+};
+
+
+struct xi_stream_pipe {
+	struct mag_cap_dev *dev;
+    /* sync for close */
+	struct rw_semaphore	io_sem;
+
+	struct xi_stream_v4l2	s_v4l2;
+
+};
+
+unsigned int enum_framesizes_type = 0;
+struct xi_stream_v4l2 *s_v4l2 = NULL;
 
 static int tw5864_querycap(struct file *file, void *priv,
                            struct v4l2_capability *cap)
 {
         struct tw5864_input *input = video_drvdata(file);
 
+	printk(" >>> %s \n", __func__);
+
         strcpy(cap->driver, "magewell");
         snprintf(cap->card, sizeof(cap->card), "Magewell Encoder %d",
                  input->nr);
         sprintf(cap->bus_info, "PCI:%s", pci_name(input->root->pci));
+	cap->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
+	cap->capabilities = cap->device_caps | V4L2_CAP_DEVICE_CAPS;
+	printk(" <<<< %s \n", __func__);
         return 0;
 }
 
@@ -53,27 +190,38 @@ static int tw5864_querycap(struct file *file, void *priv,
 static int tw5864_enum_fmt_vid_cap(struct file *file, void *priv,
                                    struct v4l2_fmtdesc *f)
 {
-        if (f->index)
-                return -EINVAL;
+printk(" --> %s \n", __func__);
 
-        f->pixelformat = V4L2_PIX_FMT_H264;
+	struct xi_fmt *fmt;
+
+	if (f->index >= ARRAY_SIZE(formats))
+		return -EINVAL;
+
+	fmt = &formats[f->index];
+
+	strlcpy(f->description, fmt->name, sizeof(f->description));
+	f->pixelformat = fmt->fourcc;
 
         return 0;
 }
 
 
+#if 0
 static int tw5864_input_std_get(struct tw5864_input *input,
                                 enum tw5864_vid_std *std)
 {
-
+printk(" --> %s \n", __func__);
 	/* TODO: Not sure what to do about this... */
 
         return 0;
 }
+#endif
 
-
+#if 0
 static v4l2_std_id tw5864_get_v4l2_std(enum tw5864_vid_std std)
 {
+
+printk(" --> %s \n", __func__);
         switch (std) {
         case STD_NTSC:    return V4L2_STD_NTSC_M;
         case STD_PAL:     return V4L2_STD_PAL_B;
@@ -86,10 +234,13 @@ static v4l2_std_id tw5864_get_v4l2_std(enum tw5864_vid_std std)
         }
         return 0;
 }
+#endif
 
-
+#if 0
 static int tw5864_querystd(struct file *file, void *priv, v4l2_std_id *std)
 {
+printk(" --> %s \n", __func__);
+	/* No matching magewell version
         struct tw5864_input *input = video_drvdata(file);
         enum tw5864_vid_std tw_std;
         int ret;
@@ -98,13 +249,16 @@ static int tw5864_querystd(struct file *file, void *priv, v4l2_std_id *std)
         if (ret)
                 return ret;
         *std = tw5864_get_v4l2_std(tw_std);
+	***/
 
         return 0;
 }
+#endif
 
 
 static enum tw5864_vid_std tw5864_from_v4l2_std(v4l2_std_id v4l2_std)
 {
+printk(" --> %s \n", __func__);
         if (v4l2_std & V4L2_STD_NTSC_M)
                 return STD_NTSC;
         if (v4l2_std & V4L2_STD_PAL_B)
@@ -128,7 +282,7 @@ static int tw5864_s_std(struct file *file, void *priv, v4l2_std_id std)
 {
         struct tw5864_input *input = video_drvdata(file);
         //struct tw5864_dev *dev = input->root;
-
+printk(" --> %s \n", __func__);
         input->v4l2_std = std;
         input->std = tw5864_from_v4l2_std(std);
         //tw_indir_writeb(TW5864_INDIR_VIN_E(input->nr), input->std);
@@ -139,6 +293,7 @@ static int tw5864_s_std(struct file *file, void *priv, v4l2_std_id std)
 static int tw5864_g_std(struct file *file, void *priv, v4l2_std_id *std)
 {
         struct tw5864_input *input = video_drvdata(file);
+printk(" --> %s \n", __func__);
 
         *std = input->v4l2_std;
         return 0;
@@ -148,29 +303,72 @@ static int tw5864_g_std(struct file *file, void *priv, v4l2_std_id *std)
 void video_capture_SetIntEnables(struct mag_cap_dev *mdev,
 				unsigned long enable_bits)
 {
+printk(" --> %s  en_bits 0x%lx\n", __func__, enable_bits);
 	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INT_ENABLE, enable_bits);
 }
 
+void video_capture_SetControlPortValue(struct mag_cap_dev *mdev, unsigned long dwValue)
+{
+printk(" --> %s \n", __func__);
+    pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_CONTROL_PORT, dwValue);
+}
 
-static int magewell_enum_input(struct file *file, void *priv,
-                             struct v4l2_input *i)
+
+unsigned long video_capture_GetIntStatus(struct mag_cap_dev *mdev)
 {
 
-#if 0
-        struct tw5864_input *input = video_drvdata(file);
-        struct tw5864_dev *dev = input->root;
+printk(" --> %s \n", __func__);
+    return pci_read_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INT_STATUS);
+}
 
-        u8 indir_0x000 = tw_indir_readb(TW5864_INDIR_VIN_0(input->nr));
-        u8 indir_0x00d = tw_indir_readb(TW5864_INDIR_VIN_D(input->nr));
-        u8 v1 = indir_0x000;
-        u8 v2 = indir_0x00d;
 
-        if (i->index)
-                return -EINVAL;
 
-        i->type = V4L2_INPUT_TYPE_CAMERA;
-        snprintf(i->name, sizeof(i->name), "Encoder %d", input->nr);
-        i->std = TW5864_NORMS;
+static int magewell_enum_input(struct file *file, void *priv,
+                             struct v4l2_input *inp)
+{
+
+	MWCAP_VIDEO_INPUT_TYPE input_type;
+	const char *name = "Auto";
+	typeof(inp->index) __index = inp->index;
+
+	memset(inp, 0, sizeof(*inp));
+
+	inp->index = __index;
+
+	
+
+        //struct tw5864_dev *dev = input->root;
+printk(" --> %s \n", __func__);
+	if (inp->index > NUM_INPUTS)
+		return -EINVAL;
+
+
+	if (inp->index == 0)
+		input_type = MWCAP_VIDEO_INPUT_TYPE_NONE;	
+	else {
+		//INPUT_TYPE(data[inp->index-1]);
+		input_type = MWCAP_VIDEO_INPUT_TYPE_HDMI;
+		name = "HDMI";
+	}
+
+        inp->type = V4L2_INPUT_TYPE_CAMERA;
+        inp->std = TW5864_NORMS;
+
+	switch (input_type) {
+		case MWCAP_VIDEO_INPUT_TYPE_NONE:
+			name = "Auto";
+			break;
+		case MWCAP_VIDEO_INPUT_TYPE_HDMI:
+			name = "Encoder HDMI";
+			break;
+		default:
+			printk(" Unknown input type\n");
+			break;
+	}
+
+        snprintf(inp->name, sizeof(inp->name), "%s", name);
+
+/***
         if (v1 & (1 << 7))
                 i->status |= V4L2_IN_ST_NO_SYNC;
         if (!(v1 & (1 << 6)))
@@ -181,31 +379,126 @@ static int magewell_enum_input(struct file *file, void *priv,
                 i->status |= V4L2_IN_ST_NO_COLOR;
         if (v2 & (1 << 2))
                 i->status |= V4L2_IN_ST_MACROVISION;
-#endif
-
+****/
+printk(" <<- %s :: %s \n", __func__, inp->name);
         return 0;
 }
 
 
 static int tw5864_g_input(struct file *file, void *priv, unsigned int *i)
 {
+
+#if 0
+    if (xi_driver_get_input_source_scan(pipe->dev->driver)) {
+        return 0;
+    }
+
+    data = xi_driver_get_supported_video_input_sources(
+            pipe->dev->driver, &count);
+
+    current_input = xi_driver_get_video_input_source(pipe->dev->driver);
+
+    for (index = 0; index < count; index++) {
+        if (data[index] == current_input) {
+            *i = index + 1;
+            break;
+        }
+    }
+#endif
+printk(" --> %s \n", __func__);
+
         *i = 0;
         return 0;
 }
 
 static int tw5864_s_input(struct file *file, void *priv, unsigned int i)
 {
+
+#if 0
+	   struct xi_stream_pipe *pipe = file->private_data;
+
+    const u32 *data;
+    int count = 0;
+
+    xi_debug(5, "entering function %s\n", __func__);
+
+    data = xi_driver_get_supported_video_input_sources(
+            pipe->dev->driver, &count);
+    if (i > count)
+        return -EINVAL;
+
+    if (i == 0) {
+        xi_driver_set_input_source_scan(pipe->dev->driver, true);
+        return 0;
+    }
+
+    xi_driver_set_input_source_scan(pipe->dev->driver, false);
+    xi_driver_set_video_input_source(pipe->dev->driver, data[i-1]);
+
+#endif
+printk(" --> %s \n", __func__);
         if (i)
                 return -EINVAL;
         return 0;
 }
 
 
-static int tw5864_fmt_vid_cap(struct file *file, void *priv,
+static struct xi_fmt *get_format(struct v4l2_format *f)
+{
+    struct xi_fmt *fmt;
+    unsigned int k;
+
+    for (k = 0; k < ARRAY_SIZE(formats); k++) {
+        fmt = &formats[k];
+        if (fmt->fourcc == f->fmt.pix.pixelformat)
+            break;
+    }
+
+    if (k == ARRAY_SIZE(formats))
+        return NULL;
+
+    return &formats[k];
+}
+
+
+static int tw5864_s_fmt_vid_cap(struct file *file, void *priv,
+				struct v4l2_format *f)
+{
+
+	char *name = "4:2:2, packed, YUYV";
+	
+printk(" --> %s \n", __func__);
+
+#if 0	
+	s_v4l2->fmt = get_format(f);
+	s_v4l2->width = f->fmt.pix.width;
+	s_v4l2->height = f->fmt.pix.height;
+	//s_v4l2->vsq.field = f->fmt.pix.field;
+	s_v4l2->stride = f->fmt.pix.bytesperline;
+	s_v4l2->image_size = f->fmt.pix.sizeimage;
+#endif
+
+	sprintf(name, "4:2:2, packed, YUYV");
+	printk("MageWell Capture: Set v4l2 format to %dx%d(%s)\n",
+            f->fmt.pix.width, f->fmt.pix.height,
+            name);
+
+	return 0;
+}
+
+static int tw5864_g_fmt_vid_cap(struct file *file, void *priv,
                               struct v4l2_format *f)
 {
-        struct tw5864_input *input = video_drvdata(file);
+        //struct tw5864_input *input = video_drvdata(file);
+	unsigned int width = 720;
+	unsigned int height = 576;
+	int depth = 16;
+	unsigned long image_size = (width * height * depth + 7) >> 3; 
 
+
+printk(" --> %s \n", __func__);
+
+#if 0
         f->fmt.pix.width = 720;
         switch (input->std) {
         default:
@@ -222,6 +515,20 @@ static int tw5864_fmt_vid_cap(struct file *file, void *priv,
         f->fmt.pix.pixelformat = V4L2_PIX_FMT_H264;
         f->fmt.pix.sizeimage = H264_VLC_BUF_SIZE;
         f->fmt.pix.colorspace = V4L2_COLORSPACE_SMPTE170M;
+#endif
+
+	
+    f->fmt.pix.width = width;
+    f->fmt.pix.height = height;
+    //f->fmt.pix.field        = s_v4l2->vsq.field;
+    f->fmt.pix.field = V4L2_FIELD_INTERLACED;
+
+
+    f->fmt.pix.pixelformat  = V4L2_PIX_FMT_YUYV;
+    f->fmt.pix.bytesperline = width; //s_v4l2->width; //s_v4l2->stride;
+    f->fmt.pix.sizeimage    = image_size;//s_v4l2->image_size;
+
+
         return 0;
 }
 
@@ -229,6 +536,7 @@ static int tw5864_fmt_vid_cap(struct file *file, void *priv,
 static int tw5864_subscribe_event(struct v4l2_fh *fh,
                                   const struct v4l2_event_subscription *sub)
 {
+printk(" --> %s \n", __func__);
         switch (sub->type) {
         case V4L2_EVENT_CTRL:
                 return v4l2_ctrl_subscribe_event(fh, sub);
@@ -245,24 +553,71 @@ static int tw5864_subscribe_event(struct v4l2_fh *fh,
 static int tw5864_enum_framesizes(struct file *file, void *priv,
                                   struct v4l2_frmsizeenum *fsize)
 {
-        struct tw5864_input *input = video_drvdata(file);
+	    int i;
 
-        if (fsize->index > 0)
-                return -EINVAL;
-        if (fsize->pixel_format != V4L2_PIX_FMT_H264)
-                return -EINVAL;
+    for (i = 0; i < ARRAY_SIZE(formats); i++)
+        if (formats[i].fourcc == fsize->pixel_format)
+            break;
+    if (i == ARRAY_SIZE(formats))
+        return -EINVAL;
 
+    switch (enum_framesizes_type) {
+    case 1: //
+        if (fsize->index < 0 || fsize->index >= ARRAY_SIZE(g_frmsize_array))
+            return -EINVAL;
         fsize->type = V4L2_FRMSIZE_TYPE_DISCRETE;
-        fsize->discrete.width = 720;
-        fsize->discrete.height = input->std == STD_NTSC ? 480 : 576;
+        fsize->discrete.width = g_frmsize_array[fsize->index].width;
+        fsize->discrete.height = g_frmsize_array[fsize->index].height;
+        break;
+    case 2:
+        if (fsize->index != 0)
+            return -EINVAL;
+        fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
+        fsize->stepwise.min_width = MIN_WIDTH;
+        fsize->stepwise.min_height = MIN_HEIGHT;
+        fsize->stepwise.max_width = MAX_WIDTH;
+        fsize->stepwise.max_height = MAX_HEIGHT;
+        fsize->stepwise.step_width = 1;
+        fsize->stepwise.step_height = 1;
 
-        return 0;
+        /* @walign @halign 2^align */
+        if (fsize->pixel_format == V4L2_PIX_FMT_YUYV
+                || fsize->pixel_format == V4L2_PIX_FMT_UYVY) {
+            fsize->stepwise.step_width = 2;
+            fsize->stepwise.step_height = 1;
+        } else if (fsize->pixel_format == V4L2_PIX_FMT_NV12
+                   || fsize->pixel_format == V4L2_PIX_FMT_YVU420
+                   || fsize->pixel_format == V4L2_PIX_FMT_YUV420) {
+            fsize->stepwise.step_width = 2;
+            fsize->stepwise.step_height = 2;
+        }
+        break;
+    default:
+        if (fsize->index != 0)
+            return -EINVAL;
+        fsize->type = V4L2_FRMSIZE_TYPE_CONTINUOUS;
+        fsize->stepwise.min_width = MIN_WIDTH;
+        fsize->stepwise.min_height = MIN_HEIGHT;
+        fsize->stepwise.max_width = MAX_WIDTH;
+        fsize->stepwise.max_height = MAX_HEIGHT;
+        fsize->stepwise.step_width = 1;
+        fsize->stepwise.step_height = 1;
+        break;
+    }
+
+    return 0;
+
+
 }
+
+
 
 
 static int tw5864_frameinterval_get(struct tw5864_input *input,
                                     struct v4l2_fract *frameinterval)
 {
+
+printk(" --> %s \n", __func__);
         switch (input->std) {
         case STD_NTSC:
                 frameinterval->numerator = 1001;
@@ -291,6 +646,7 @@ static int tw5864_enum_frameintervals(struct file *file, void *priv,
         struct v4l2_frmsizeenum fsize = { .index = fintv->index,
                 .pixel_format = fintv->pixel_format };
         int ret;
+printk(" --> %s \n", __func__);
 
         ret = tw5864_enum_framesizes(file, priv, &fsize);
         if (ret)
@@ -319,11 +675,11 @@ static int tw5864_g_parm(struct file *file, void *priv,
         struct v4l2_captureparm *cp = &sp->parm.capture;
         int ret;
 
+printk(" --> %s \n", __func__);
         cp->capability = V4L2_CAP_TIMEPERFRAME;
 
         ret = tw5864_frameinterval_get(input, &cp->timeperframe);
-        cp->timeperframe.numerator = input->frame_interval; //TODO: or maybe 333333
-	cp->timeperframe.denominator = 10000000;
+        cp->timeperframe.numerator *= input->frame_interval; //TODO: or maybe 333333
         cp->capturemode = 0;
         cp->readbuffers = 2;
 
@@ -338,15 +694,14 @@ static int tw5864_s_parm(struct file *file, void *priv,
         struct v4l2_fract time_base;
         int ret;
 
+printk(" --> %s \n", __func__);
         ret = tw5864_frameinterval_get(input, &time_base);
         if (ret)
                 return ret;
 
         if (!t->numerator || !t->denominator) {
-                //t->numerator = time_base.numerator * input->frame_interval;
-                //t->denominator = time_base.denominator;
-                t->numerator = 333333;
-		t->denominator = 10000000;
+                t->numerator = time_base.numerator * input->frame_interval;
+                t->denominator = time_base.denominator;
         } else if (t->denominator != time_base.denominator) {
                 t->numerator = t->numerator * time_base.denominator /
                         t->denominator;
@@ -404,7 +759,112 @@ static void tw5864_frame_interval_set(struct tw5864_input *input)
 
 }
 
+static int magewell_vidioc_queryctrl(struct file *file, void *priv,
+        struct v4l2_queryctrl *qc)
+{
+    switch (qc->id) {
+    case V4L2_CID_BRIGHTNESS:
+        return v4l2_ctrl_query_fill(qc, -100, 100, 1, 0);
+    case V4L2_CID_CONTRAST:
+        return v4l2_ctrl_query_fill(qc, 50, 200, 1, 100);
+    case V4L2_CID_SATURATION:
+        return v4l2_ctrl_query_fill(qc, 0, 200, 1, 100);
+    case V4L2_CID_HUE:
+        return v4l2_ctrl_query_fill(qc, -90, 90, 1, 0);
+    }
+    return -EINVAL;
+}
 
+
+
+
+static int magewell_try_fmt_vid_cap(struct file *file, void *priv,
+        struct v4l2_format *f)
+{
+    struct xi_fmt *fmt;
+    enum v4l2_field field;
+
+printk(" +++ start %s  \n", __func__);
+    fmt = get_format(f);
+    if (!fmt) {
+        pr_err("Fourcc format (0x%08x) invalid.\n",
+                f->fmt.pix.pixelformat);
+        return -EINVAL;
+    }
+
+    field = f->fmt.pix.field;
+
+    if (field == V4L2_FIELD_ANY) {
+        field = V4L2_FIELD_NONE;
+    } else if (V4L2_FIELD_NONE != field) {
+        pr_debug("Field type invalid.\n");
+        return -EINVAL;
+    }
+
+    f->fmt.pix.field = field;
+    /* @walign @halign 2^align */
+    if (fmt->fourcc == V4L2_PIX_FMT_YUYV
+            || fmt->fourcc == V4L2_PIX_FMT_UYVY) {
+        v4l_bound_align_image(&f->fmt.pix.width, MIN_WIDTH, MAX_WIDTH, 1,
+                              &f->fmt.pix.height, MIN_HEIGHT, MAX_HEIGHT, 0, 0);
+    } else if (fmt->fourcc == V4L2_PIX_FMT_NV12
+               || fmt->fourcc == V4L2_PIX_FMT_YVU420
+               || fmt->fourcc == V4L2_PIX_FMT_YUV420) {
+        v4l_bound_align_image(&f->fmt.pix.width, MIN_WIDTH, MAX_WIDTH, 1,
+                              &f->fmt.pix.height, MIN_HEIGHT, MAX_HEIGHT, 1, 0);
+    } else {
+        v4l_bound_align_image(&f->fmt.pix.width, MIN_WIDTH, MAX_WIDTH, 0,
+                              &f->fmt.pix.height, MIN_HEIGHT, MAX_HEIGHT, 0, 0);
+    }
+
+    /*
+     * bytesperline不能接收用户设置的值，因为有些软件会传入不正确的值(如：mplayer的bytesperline
+     * 是v4l2 G_FMT得到的，与现在要设置的分辨率不符).
+     */
+    if (fmt->fourcc == V4L2_PIX_FMT_NV12 ||
+            fmt->fourcc == V4L2_PIX_FMT_YVU420 ||
+            fmt->fourcc == V4L2_PIX_FMT_YUV420) {
+        f->fmt.pix.bytesperline = f->fmt.pix.width;
+
+        f->fmt.pix.sizeimage =
+            (f->fmt.pix.height * f->fmt.pix.bytesperline * fmt->depth + 7) >> 3;
+    } else { // packed
+        f->fmt.pix.bytesperline = (f->fmt.pix.width * fmt->depth + 7) >> 3;
+
+        f->fmt.pix.sizeimage = f->fmt.pix.height * f->fmt.pix.bytesperline;
+    }
+
+    return 0;
+}
+
+#if 0
+static int magdev_reqbufs(struct file *file, void *priv,
+        struct v4l2_requestbuffers *p)
+{
+    struct xi_stream_pipe *pipe = file->private_data;
+    struct v4l2_sg_buf_queue *vsq = &pipe->s_v4l2.vsq;
+    struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
+
+    printk("entering function %s\n", __func__);
+
+    return v4l2_sg_queue_reqbufs(vsq, p, s_v4l2->image_size);
+}
+
+
+/*
+ * user get the video buffer status
+ * for mmap, get the map offset
+ * */
+static int magdev_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
+{
+    struct xi_stream_pipe *pipe = file->private_data;
+    struct v4l2_sg_buf_queue *vsq = &pipe->s_v4l2.vsq;
+    printk("entering function %s\n", __func__);
+
+    return v4l2_sg_queue_querybuf(vsq, p);
+}
+
+#endif
 
 static const struct v4l2_ioctl_ops video_ioctl_ops = {
         .vidioc_querycap = tw5864_querycap,
@@ -415,7 +875,7 @@ static const struct v4l2_ioctl_ops video_ioctl_ops = {
         .vidioc_qbuf = vb2_ioctl_qbuf,
         .vidioc_dqbuf = vb2_ioctl_dqbuf,
         .vidioc_expbuf = vb2_ioctl_expbuf,
-        .vidioc_querystd = tw5864_querystd,
+        //.vidioc_querystd = tw5864_querystd,
         .vidioc_s_std = tw5864_s_std,
         .vidioc_g_std = tw5864_g_std,
         .vidioc_enum_input = magewell_enum_input,
@@ -423,9 +883,9 @@ static const struct v4l2_ioctl_ops video_ioctl_ops = {
         .vidioc_s_input = tw5864_s_input,
         .vidioc_streamon = vb2_ioctl_streamon,
         .vidioc_streamoff = vb2_ioctl_streamoff,
-        .vidioc_try_fmt_vid_cap = tw5864_fmt_vid_cap,
-        .vidioc_s_fmt_vid_cap = tw5864_fmt_vid_cap,
-        .vidioc_g_fmt_vid_cap = tw5864_fmt_vid_cap,
+        .vidioc_try_fmt_vid_cap = magewell_try_fmt_vid_cap,
+        .vidioc_s_fmt_vid_cap = tw5864_s_fmt_vid_cap,
+        .vidioc_g_fmt_vid_cap = tw5864_g_fmt_vid_cap,
         .vidioc_log_status = v4l2_ctrl_log_status,
         .vidioc_subscribe_event = tw5864_subscribe_event,
         .vidioc_unsubscribe_event = v4l2_event_unsubscribe,
@@ -433,6 +893,7 @@ static const struct v4l2_ioctl_ops video_ioctl_ops = {
         .vidioc_enum_frameintervals = tw5864_enum_frameintervals,
         .vidioc_s_parm = tw5864_s_parm,
         .vidioc_g_parm = tw5864_g_parm,
+	.vidioc_queryctrl = magewell_vidioc_queryctrl,
 #ifdef CONFIG_VIDEO_ADV_DEBUG
         //.vidioc_g_register = tw5864_g_reg,
         //.vidioc_s_register = tw5864_s_reg,
@@ -466,13 +927,17 @@ int video_init(struct mag_cap_dev *dev, int *video_nr)
         int last_dma_allocated = -1;
         int last_input_nr_registered = -1;
 
+	spin_lock_irqsave(&dev->slock, flags);
+
         for (i = 0; i < H264_BUF_CNT; i++) {
                 struct magdev_h264_frame *frame = &dev->h264_buf[i];
 
+
+		//os_contig_dma_alloc
                 frame->vlc.addr = dma_alloc_coherent(&dev->pci->dev,
                                                      H264_VLC_BUF_SIZE,
                                                      &frame->vlc.dma_addr,
-                                                     GFP_KERNEL | GFP_DMA32);
+                                                     GFP_KERNEL | GFP_DMA32); //?? 
                 if (!frame->vlc.addr) {
                         dev_err(&dev->pci->dev, "dma alloc fail\n");
                         ret = -ENOMEM;
@@ -490,15 +955,29 @@ int video_init(struct mag_cap_dev *dev, int *video_nr)
                         goto free_dma;
                 }
                 last_dma_allocated = i;
+
+		xi_pcie_dma_controller_xfer_chain(&dev->vpp_dma_ctrl[0],
+				0, //DMA phys addr high
+				frame->vlc.dma_addr, //DMA phys addr low
+				1);
+
         }
+
+	//xi_pcie_dma_desc_chain_get_address ??
+	/* mw_physical_addr_t desc_phys = os_contig_dma_get_phys(pobj->addr_desc);
+	 *
+	 *     addr.addr_high = sizeof(desc_phys) > 4 ? (desc_phys >> 32) & 0xFFFFFFFF : 0;
+	 *         addr.addr_low  = desc_phys & 0xFFFFFFFF;
+	 */
 
 	/* reset input */
 	
 
-	spin_lock_irqsave(&dev->slock, flags);
         dev->encoder_busy = 0;
         dev->h264_buf_r_index = 0;
         dev->h264_buf_w_index = 0;
+
+
         /*tw_writel(TW5864_VLC_STREAM_BASE_ADDR,
                   dev->h264_buf[dev->h264_buf_w_index].vlc.dma_addr);
         tw_writel(TW5864_MV_STREAM_BASE_ADDR,
@@ -511,6 +990,7 @@ int video_init(struct mag_cap_dev *dev, int *video_nr)
 
         for (i = 0; i < NUM_INPUTS; i++) {
                 dev->inputs[i].root = dev;
+		dev->inputs[i].root->parent_dev = dev;
                 dev->inputs[i].nr = i;
                 ret = tw5864_video_input_init(&dev->inputs[i], video_nr[i]);
                 if (ret)
@@ -545,6 +1025,26 @@ free_dma:
 
 static int tw5864_s_ctrl(struct v4l2_ctrl *ctrl)
 {
+
+	printk(" >>>> %s \n", __func__);
+
+#if 0
+	/* setup default video format */
+	s_v4l2->fmt = g_def_fmt;
+	s_v4l2->width = g_def_width;
+	s_v4l2->height = g_def_height;
+	s_v4l2->frame_duration = g_def_frame_duration;
+	if (s_v4l2->fmt->fourcc == V4L2_PIX_FMT_NV12 ||
+		s_v4l2->fmt->fourcc == V4L2_PIX_FMT_YVU420 ||
+		s_v4l2->fmt->fourcc == V4L2_PIX_FMT_YUV420) {
+		s_v4l2->stride = s_v4l2->width;
+		s_v4l2->image_size = (s_v4l2->width * s_v4l2->height * s_v4l2->fmt->depth + 7) >> 3;
+	} else {
+		s_v4l2->stride = (s_v4l2->width * s_v4l2->fmt->depth + 7) >> 3;
+		s_v4l2->image_size = s_v4l2->stride * s_v4l2->height;
+	}
+#endif
+
 
 #if 0
         struct tw5864_input *input =
@@ -603,14 +1103,22 @@ static int tw5864_s_ctrl(struct v4l2_ctrl *ctrl)
 
 static int tw5864_disable_input(struct tw5864_input *input)
 {
-        /*struct tw5864_dev *dev = input->root;
-        unsigned long flags; */
+        struct mag_cap_dev *dev = NULL;
+        unsigned long flags;
 
+	if (input->root == NULL) {
+		printk(" %s Error param is NULL \n", __func__);
+		return -1;
+	}
+
+	dev = input->root;
         printk("Disabling channel %d\n", input->nr);
 
-        /*spin_lock_irqsave(&dev->slock, flags);
+	pci_write_reg32(dev->vid_cap_addr + VIDEO_REG_ADDR_INPUT_CONTROL, 0x00);
+
+        spin_lock_irqsave(&dev->slock, flags);
         input->enabled = 0;
-        spin_unlock_irqrestore(&dev->slock, flags);*/
+        spin_unlock_irqrestore(&dev->slock, flags);
 
         return 0;
 }
@@ -618,9 +1126,7 @@ static int tw5864_disable_input(struct tw5864_input *input)
 
 static int tw5864_enable_input(struct tw5864_input *input)
 {
-#if 1
-        struct mag_cap_dev *dev = input->root;
-        int nr = input->nr;
+        struct mag_cap_dev *mdev = NULL;
         unsigned long flags;
         int d1_width = 720;
         int d1_height = 0;
@@ -629,24 +1135,32 @@ static int tw5864_enable_input(struct tw5864_input *input)
         int reg_frame_bus = 0x1c;
         int fmt_reg_value = 0;
         int downscale_enabled = 0;
-#endif
+	bool cpld_tag_valid, intr_valid, desc_reader_busy;
+	u32 cpld_tag;
 	printk(" Enabling channel %d\n", input->nr);
         //dev_dbg(&dev->pci->dev, "Enabling channel %d\n", nr);
 
-#if 0
         input->frame_seqno = 0;
         input->frame_gop_seqno = 0;
         input->h264_idr_pic_id = 0;
 
+
+	if (input->root == NULL) {
+		printk(" [%s] input->root is NULL \n", __func__);
+	}
+	mdev = input->root;
+
+	/***
         input->reg_dsp_qp = input->qp;
         input->reg_dsp_ref_mvp_lambda = lambda_lookup_table[input->qp];
         input->reg_dsp_i4x4_weight = intra4x4_lambda3[input->qp];
         input->reg_emu = TW5864_EMU_EN_LPF | TW5864_EMU_EN_BHOST
                 | TW5864_EMU_EN_SEN | TW5864_EMU_EN_ME | TW5864_EMU_EN_DDR;
-        input->reg_dsp = nr /* channel id */
+        input->reg_dsp = nr
                 | TW5864_DSP_CHROM_SW
                 | ((0xa << 8) & TW5864_DSP_MB_DELAY)
                 ;
+	***/
 
         input->resolution = D1;
 
@@ -665,10 +1179,9 @@ static int tw5864_enable_input(struct tw5864_input *input)
                 reg_frame_bus = 0x1c;
                 fmt_reg_value = 0;
                 downscale_enabled = 0;
-                input->reg_dsp_codec |= TW5864_CIF_MAP_MD | TW5864_HD1_MAP_MD;
-                input->reg_emu |= TW5864_DSP_FRAME_TYPE_D1;
-                input->reg_interlacing = TW5864_DI_EN | TW5864_DSP_INTER_ST;
-
+                //input->reg_dsp_codec |= TW5864_CIF_MAP_MD | TW5864_HD1_MAP_MD;
+                //input->reg_emu |= TW5864_DSP_FRAME_TYPE_D1;
+                //input->reg_interlacing = TW5864_DI_EN | TW5864_DSP_INTER_ST;
 		//tw_setl(TW5864_FULL_HALF_FLAG, 1 << nr);
                 break;
         case HD1:
@@ -679,9 +1192,8 @@ static int tw5864_enable_input(struct tw5864_input *input)
                 reg_frame_bus = 0x1c;
                 fmt_reg_value = 0;
                 downscale_enabled = 0;
-                input->reg_dsp_codec |= TW5864_HD1_MAP_MD;
-                input->reg_emu |= TW5864_DSP_FRAME_TYPE_D1;
-
+                //input->reg_dsp_codec |= TW5864_HD1_MAP_MD;
+                //input->reg_emu |= TW5864_DSP_FRAME_TYPE_D1;
                 //tw_clearl(TW5864_FULL_HALF_FLAG, 1 << nr);
 
                 break;
@@ -693,8 +1205,7 @@ static int tw5864_enable_input(struct tw5864_input *input)
                 reg_frame_bus = 0x07;
                 fmt_reg_value = 1;
                 downscale_enabled = 1;
-                input->reg_dsp_codec |= TW5864_CIF_MAP_MD;
-
+                //input->reg_dsp_codec |= TW5864_CIF_MAP_MD;
                 //tw_clearl(TW5864_FULL_HALF_FLAG, 1 << nr);
                 break;
         case QCIF:
@@ -705,56 +1216,74 @@ static int tw5864_enable_input(struct tw5864_input *input)
                 reg_frame_bus = 0x07;
                 fmt_reg_value = 1;
                 downscale_enabled = 1;
-                input->reg_dsp_codec |= TW5864_CIF_MAP_MD;
-
+                //input->reg_dsp_codec |= TW5864_CIF_MAP_MD;
                 //tw_clearl(TW5864_FULL_HALF_FLAG, 1 << nr);
                 break;
         }
+// Start clone video_capture_StartInput , hard coded values
+//    StartInput, Interlaced: 0, Pos: 260, 25, Size: 1280x720 
 
-        /* analog input width / 4 */
-        tw_indir_writeb(TW5864_INDIR_IN_PIC_WIDTH(nr), d1_width / 4);
-        tw_indir_writeb(TW5864_INDIR_IN_PIC_HEIGHT(nr), d1_height / 4);
 
-        /* output width / 4 */
-        tw_indir_writeb(TW5864_INDIR_OUT_PIC_WIDTH(nr), input->width / 4);
-        tw_indir_writeb(TW5864_INDIR_OUT_PIC_HEIGHT(nr), input->height / 4);
+	pci_write_reg32(mdev->vid_cap_addr+ VIDEO_REG_ADDR_INPUT_CLIP_X_CONTROL, 0x6030104);
 
-        tw_writel(TW5864_DSP_PIC_MAX_MB,
-                  ((input->width / 16) << 8) | (input->height / 16));
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INPUT_CLIP_F0_Y_CONTROL, 0x2e80019);
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INPUT_CLIP_F1_Y_CONTROL, 0x2e80019);
 
-        tw_writel(TW5864_FRAME_WIDTH_BUS_A(nr),
-                  frame_width_bus_value);
-        tw_writel(TW5864_FRAME_WIDTH_BUS_B(nr),
-                  frame_width_bus_value);
-        tw_writel(TW5864_FRAME_HEIGHT_BUS_A(nr),
-                  frame_height_bus_value);
-        tw_writel(TW5864_FRAME_HEIGHT_BUS_B(nr),
-                  (frame_height_bus_value + 1) / 2 - 1);
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_VFS_FULL_LINE_CONTROL, 0x4001400);
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_VFS_FULL_MAX_LINE_ID, 0x2cf02cf);
 
-        tw5864_frame_interval_set(input);
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_VFS_QUARTER_LINE_CONTROL, 0x2000a00);
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_VFS_QUARTER_MAX_LINE_ID, 0x167);
 
-        if (downscale_enabled)
-                tw_setl(TW5864_H264EN_CH_DNS, 1 << nr);
+	// Control register
+/*
+	dwValue = 0x01;
+	if (bInterlaced) dwValue |= 0x02;
+	if (bInvertField) dwValue |= 0x04;
+	if (bTopFieldFirst) dwValue |= 0x08;
+	if (bLineAlternative) dwValue |= 0x10;
+	if (bInterlacedToTopBottom) dwValue |= 0x20;
+	if (bInterlacedFramePacking) dwValue |= 0x40;
 
-        tw_mask_shift_writel(TW5864_H264EN_CH_FMT_REG1, 0x3, 2 * nr,
-                             fmt_reg_value);
+	dwValue |= ((nStartFrameId & 0x0F) << 8);
+	dwValue |= (cyInterlacedFramePacking << 16);
+*/
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INPUT_CONTROL, 0x9);
 
-        tw_mask_shift_writel((nr < 2
-                              ? TW5864_H264EN_RATE_MAX_LINE_REG1
-                              : TW5864_H264EN_RATE_MAX_LINE_REG2),
-                             0x1f, 5 * (nr % 2),
-                             input->std == STD_NTSC ? 29 : 24);
+	xi_pcie_dma_controller_enable(&mdev->vpp_dma_ctrl[0]);
+	xi_pcie_dma_controller_enable(&mdev->vpp_dma_ctrl[1]);
 
-        tw_mask_shift_writel((nr < 2) ? TW5864_FRAME_BUS1 :
-                             TW5864_FRAME_BUS2, 0xff, (nr % 2) * 8,
-                             reg_frame_bus);
+	xi_pcie_dma_controller_get_status(&mdev->vpp_dma_ctrl[0], &intr_valid,
+			&cpld_tag_valid, &desc_reader_busy, &cpld_tag); 
 
-        spin_lock_irqsave(&dev->slock, flags);
+	printk(" DMA controller status == intr_valid: %d cpld_tag_valid: %d \
+			desc_busy %d cpld_tag: 0x%x \n", intr_valid,
+			cpld_tag_valid, desc_reader_busy, cpld_tag);
+
+        spin_lock_irqsave(&mdev->slock, flags);
         input->enabled = 1;
-        spin_unlock_irqrestore(&dev->slock, flags);
-#endif
+        spin_unlock_irqrestore(&mdev->slock, flags);
         return 0;
 }
+
+/* --------------------------------------------------------- */
+/*   VB2 queue operations				     */
+
+/* ------------------------------------------------------------------ */
+
+/* calc max # of buffers from size (must not exceed the 4MB virtual
+ * address space per DMA channel) */
+#if 0
+static int tw68_buffer_count(unsigned int size, unsigned int count)
+{
+        unsigned int maxcount;
+
+        maxcount = (4 * 1024 * 1024) / roundup(size, PAGE_SIZE);
+        if (count > maxcount)
+                count = maxcount;
+        return count;
+}
+#endif
 
 
 static int tw5864_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
@@ -763,9 +1292,9 @@ static int tw5864_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 {
         if (*num_planes)
                 return sizes[0] < H264_VLC_BUF_SIZE ? -EINVAL : 0;
-
-        sizes[0] = H264_VLC_BUF_SIZE;
-        *num_planes = 1;
+        
+	sizes[0] = H264_VLC_BUF_SIZE;
+	*num_planes = 1;
 
         return 0;
 }
@@ -784,11 +1313,59 @@ static void tw5864_buf_queue(struct vb2_buffer *vb)
         spin_unlock_irqrestore(&dev->slock, flags);
 }
 
+#if 0
+static int tw5864_buf_prepare(struct vb2_buffer *vb)
+{
+        struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+        struct vb2_queue *vq = vb->vb2_queue;
+        struct tw5864_dev *dev = vb2_get_drv_priv(vq);
+        struct tw5864_buf *buf = container_of(vbuf, struct tw5864_buf, vb);
+        struct sg_table *dma = vb2_dma_sg_plane_desc(vb, 0);
+        unsigned size, bpl;
+
+        size = (dev->width * dev->height * dev->fmt->depth) >> 3;
+        if (vb2_plane_size(vb, 0) < size)
+                return -EINVAL;
+        vb2_set_plane_payload(vb, 0, size);
+
+	
+        bpl = (dev->width * dev->fmt->depth) >> 3;
+        switch (dev->field) {
+        case V4L2_FIELD_TOP:
+                tw68_risc_buffer(dev->pci, buf, dma->sgl,
+                                 0, UNSET, bpl, 0, dev->height);
+                break;
+        case V4L2_FIELD_BOTTOM:
+                tw68_risc_buffer(dev->pci, buf, dma->sgl,
+                                 UNSET, 0, bpl, 0, dev->height);
+                break;
+        case V4L2_FIELD_SEQ_TB:
+                tw68_risc_buffer(dev->pci, buf, dma->sgl,
+                                 0, bpl * (dev->height >> 1),
+                                 bpl, 0, dev->height >> 1);
+                break;
+        case V4L2_FIELD_SEQ_BT:
+                tw68_risc_buffer(dev->pci, buf, dma->sgl,
+                                 bpl * (dev->height >> 1), 0,
+                                 bpl, 0, dev->height >> 1);
+                break;
+        case V4L2_FIELD_INTERLACED:
+        default:
+                tw68_risc_buffer(dev->pci, buf, dma->sgl,
+                                 0, bpl, bpl, bpl, dev->height >> 1);
+                break;
+        }
+        return 0;
+}
+
+#endif
+
 static int tw5864_start_streaming(struct vb2_queue *q, unsigned int count)
 {
         struct tw5864_input *input = vb2_get_drv_priv(q);
         int ret;
 
+	printk(" %s <<< enter \n", __func__);
         ret = tw5864_enable_input(input);
         if (!ret)
                 return 0;
@@ -800,15 +1377,18 @@ static int tw5864_start_streaming(struct vb2_queue *q, unsigned int count)
                 list_del(&buf->list);
                 vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_QUEUED);
         }
+	printk(" %s >>>> exit \n", __func__);
         return ret;
 }
+
+
 
 
 static void tw5864_stop_streaming(struct vb2_queue *q)
 {
         unsigned long flags;
         struct tw5864_input *input = vb2_get_drv_priv(q);
-
+printk(" %s <<<<< \n", __func__);
         tw5864_disable_input(input);
 
         spin_lock_irqsave(&input->slock, flags);
@@ -831,6 +1411,8 @@ static void tw5864_stop_streaming(struct vb2_queue *q)
 static struct vb2_ops tw5864_video_qops = {
         .queue_setup = tw5864_queue_setup,
         .buf_queue = tw5864_buf_queue,
+	/*.buf_prepare = tw5864_buf_prepare,
+	.buf_finish     = tw5864_buf_finish, */
         .start_streaming = tw5864_start_streaming,
         .stop_streaming = tw5864_stop_streaming,
         .wait_prepare = vb2_ops_wait_prepare,
@@ -970,6 +1552,8 @@ static void tw5864_handle_frame_task(unsigned long data)
         unsigned long flags;
         int batch_size = H264_BUF_CNT;
 
+printk(" ++= %s +++ \n", __func__);
+
         spin_lock_irqsave(&dev->slock, flags);
         while (dev->h264_buf_r_index != dev->h264_buf_w_index && batch_size--) {
                 struct magdev_h264_frame *frame =
@@ -1094,5 +1678,96 @@ static void tw5864_handle_frame(struct magdev_h264_frame *frame)
 #endif
 
         vb2_buffer_done(&vb->vb.vb2_buf, VB2_BUF_STATE_DONE);
+
+	printk(" %s -- vb2_ BUFF done!! \n", __func__);
+}
+
+#if 0
+
+static int _stream_v4l2_init(struct xi_stream_pipe *pipe)
+{
+    struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
+    struct mag_cap_dev *dev = pipe->dev;
+
+    s_v4l2->generating = 0;
+    mutex_init(&s_v4l2->v4l2_mutex);
+
+    v4l2_sg_queue_init(&s_v4l2->vsq,
+                       V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                       &s_v4l2->v4l2_mutex, // will unlock when dqbuf is waiting
+                       dev->parent_dev,
+                       V4L2_FIELD_NONE
+                       );
+
+    /* init video dma queues */
+    INIT_LIST_HEAD(&s_v4l2->active);
+
+    s_v4l2->fmt = g_def_fmt;
+    s_v4l2->width = g_def_width;
+    s_v4l2->height = g_def_height;
+    s_v4l2->frame_duration = g_def_frame_duration;
+    if (s_v4l2->fmt->fourcc == V4L2_PIX_FMT_NV12 ||
+            s_v4l2->fmt->fourcc == V4L2_PIX_FMT_YVU420 ||
+            s_v4l2->fmt->fourcc == V4L2_PIX_FMT_YUV420) {
+        s_v4l2->stride = s_v4l2->width;
+        s_v4l2->image_size = (s_v4l2->width * s_v4l2->height * s_v4l2->fmt->depth + 7) >> 3;
+    } else {
+        s_v4l2->stride = (s_v4l2->width * s_v4l2->fmt->depth + 7) >> 3;
+        s_v4l2->image_size = s_v4l2->stride * s_v4l2->height;
+    }
+
+    return 0;
+}
+
+
+static int xi_open(struct file *file)
+{
+    struct mag_cap_dev *dev = video_drvdata(file);
+    struct xi_stream_pipe *pipe;
+
+    printk( "entering function %s\n", __func__);
+
+    if (file->private_data != NULL)
+        return -EFAULT;
+
+    pipe = kzalloc(sizeof(*pipe), GFP_KERNEL);
+    if (pipe == NULL)
+        return -ENOMEM;
+
+    pipe->dev = dev;
+
+    init_rwsem(&pipe->io_sem);
+
+    _stream_v4l2_init(pipe);
+
+    //dev->inputs[i].root ??
+    pipe->dev->dma_priv = dev->parent_dev;
+
+
+    file->private_data = pipe;
+
+    return 0;
+}
+
+#endif
+
+static unsigned int xi_poll(struct file *file, struct poll_table_struct *wait)
+{
+    struct xi_stream_pipe *pipe = file->private_data;
+    struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
+    unsigned int mask = 0;
+
+    printk("entering function %s\n", __func__);
+
+    down_read(&pipe->io_sem);
+
+    mutex_lock(&s_v4l2->v4l2_mutex);
+    //if (v4l2_is_generating(s_v4l2))
+    //    mask |= v4l2_sg_queue_poll(file, &s_v4l2->vsq, wait);
+    mutex_unlock(&s_v4l2->v4l2_mutex);
+
+    up_read(&pipe->io_sem);
+
+    return mask;
 }
 
