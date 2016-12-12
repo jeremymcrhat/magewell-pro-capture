@@ -206,10 +206,15 @@ static inline int dma_map_sg_attrs(struct device *dev, struct scatterlist *sg,
 				   int nents, enum dma_data_direction dir,
 				   unsigned long attrs)
 {
-	struct dma_map_ops *ops = get_dma_ops(dev);
+	struct dma_map_ops *ops = NULL;
 	int i, ents;
 	struct scatterlist *s;
 
+	ops = get_dma_ops(dev);
+	if (dev == NULL)
+		printk("%s:: DEV is null !!! \n", __func__);
+	if (sg == NULL)
+		printk("%s SG is NULL !!!\n", __func__);
 	for_each_sg(sg, s, nents, i)
 		kmemcheck_mark_initialized(sg_virt(s), s->length);
 	BUG_ON(!valid_dma_direction(dir));

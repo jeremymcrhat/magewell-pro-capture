@@ -13,6 +13,12 @@ enum REG_ADDR {
     REG_ADDR_DESC_CPLD_TAG		= 6 * 4
 };
 
+
+void xi_pcie_dma_controller_init(struct pcie_dma_controller *pobj, volatile void __iomem *baseaddr)
+{
+    pobj->reg_base = baseaddr;
+}
+
 void xi_pcie_dma_controller_set_control(struct pcie_dma_controller *pobj, bool enable)
 {
     pci_write_reg32(pobj->reg_base+REG_ADDR_CONTROL, enable ? 0x01 : 0x00);

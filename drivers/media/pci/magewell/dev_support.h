@@ -184,6 +184,8 @@ struct mag_cap_dev {
 	struct pcie_dma_controller         vpp_dma_ctrl[2];
 	struct pcie_memory_writer          vpp_memory_writer[2];
 	struct pcie_dma_controller         upload_dma_ctrl;
+	struct pcie_dma_desc_chain         vpp_dma_chain[2];
+	struct resource_pool               vpp_pool;
 
 	struct magdev_h264_frame h264_buf[H264_BUF_CNT];
 	struct spi_master_controller spi;
@@ -192,7 +194,7 @@ struct mag_cap_dev {
 	struct xi_i2c_master i2c_master;
 	void __iomem *vid_cap_addr;
 	u32 video_cap_enabled_int;
-	void *parent_dev;
+	struct device *parent_dev;
 	os_dma_par_t dma_priv;	
 };
 

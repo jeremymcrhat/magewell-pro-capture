@@ -19,6 +19,9 @@ MODULE_PARM_DESC(video_nr, "video devices numbers array");
 int video_init(struct mag_cap_dev *dev, int *video_nr);
 void tw5864_video_fini(struct mag_cap_dev *dev);
 
+//Get rid of this later
+int os_init(void);
+
 
 static irqreturn_t capture_irq_handler(int irq, void *dev_id)
 {
@@ -87,6 +90,10 @@ static void authenticate_video(struct mag_cap_dev *mdev)
 	const u8 activation_mark_compare[] = { 'M', 'A', 'G', 'E', 'W', 'E', 'L', 'L' };
 	u8 active_code[8] = { 0 };
 
+	if (xi_linx_dna_is_auth_passed(mdev))
+	{
+		printk(" DNA video already authenticated ! \n");
+	}
 	/*check that the ds28e01 is present ? */
 	/* have we already completed the authorization? */
 	ds28e01_read_memory(&mdev->ds28e01, activation_mark, 24, 8);
@@ -102,6 +109,12 @@ static void authenticate_video(struct mag_cap_dev *mdev)
 	ds28e01_read_memory(&mdev->ds28e01, active_code, 0x10, 8);
 	xi_linx_dna_authenticate(mdev, *(u32 *)(&active_code[0]));
 	xi_linx_dna_authenticate(mdev, *(u32 *)(&active_code[4]));
+
+	if (xi_linx_dna_is_auth_passed(mdev))
+		printk("%s DNA authorization successful!\n", __func__);
+	else
+		printk("%s DNA auth FAILED!! \n", __func__);
+
 }
 
 void read_serial_num(struct mag_cap_dev *mdev, char *serial_no)
@@ -134,6 +147,13 @@ static int magwell_probe(struct pci_dev *pci_dev,
 
 	dev_info(&pci_dev->dev, "probe enter!\n");
 
+	printk("  OS_INIT !\n");
+
+	ret = os_init();
+	if (ret) {
+		printk(" Error INIT OS !!! \n");
+	}
+
 	dev = devm_kzalloc(&pci_dev->dev, sizeof(struct mag_cap_dev), GFP_KERNEL);
 	if(!dev)
 		return -ENOMEM;
@@ -148,6 +168,7 @@ static int magwell_probe(struct pci_dev *pci_dev,
 
 	/* pci init */
 	dev->pci = pci_dev;
+	dev->parent_dev = &pci_dev->dev;
 	ret = pci_enable_device(pci_dev);
 	if (ret) {
 		dev_err(&dev->pci->dev, "pci_enable_device() failed (%d)\n", ret);
@@ -161,6 +182,7 @@ static int magwell_probe(struct pci_dev *pci_dev,
 		dev_err(&dev->pci->dev, "32bit PCI DMA is not supported\n");
 		goto disable_pci;
 	}
+
 
 	/* get MMIO */
 
@@ -182,7 +204,8 @@ static int magwell_probe(struct pci_dev *pci_dev,
 		printk(" MSI enabled \n");
 	}
 
-	//pci_set_drvdata(pci_dev, dev);  //do i really need this?
+
+	pci_set_drvdata(pci_dev, dev);
 
 	spin_lock_init(&dev->slock);
 
@@ -259,8 +282,6 @@ static int magwell_probe(struct pci_dev *pci_dev,
 	read_serial_num(dev, serial_num);
 	
 	dev_info(&pci_dev->dev, "  Serial NO: %s \n", serial_num);
-	/* Enable MSI TODO */
-	//enable_pci_msi(....)
 
 	/* Authenticate or else captured frames will be black */
 	authenticate_video(dev);
@@ -342,8 +363,8 @@ static int magwell_probe(struct pci_dev *pci_dev,
 	dev->vpp_memory_writer[0].reg_base = dev->mmio + VPP1_MWR_DMA_BASE_ADDR;
 	dev->vpp_memory_writer[1].reg_base = dev->mmio + VPP2_MWR_DMA_BASE_ADDR;
 
-	//Enable PCIe DMA controller (hard code 0 for now)
-	xi_pcie_dma_controller_enable(&dev->vpp_dma_ctrl[0]);
+	xi_pcie_dma_controller_init(&dev->vpp_dma_ctrl[0], dev->mmio + VPP1_DMA_BASE_ADDR);
+	xi_pcie_dma_controller_init(&dev->vpp_dma_ctrl[1], dev->mmio + VPP2_DMA_BASE_ADDR);
 
 	
 	/* Initialize video */
@@ -376,13 +397,18 @@ static int magwell_probe(struct pci_dev *pci_dev,
 
 	video_capture_SetIntEnables(dev, dev->video_cap_enabled_int);
 	irq_set_enable_bits(dev, IRQ_MASK_VID_CAPTURE);
-	
 
+	dev->parent_dev = &pci_dev->dev;	
+	printk(" %s DevName: %s \n", __func__, dev_name(dev->parent_dev));
+
+	printk(" IRQ enabled bits: %08X\n", irq_get_enable_bits_value(dev));
+	printk("IRQ enabled status: %08X\n", irq_get_enabled_status(dev));
+	printk(" IRQ raw status: %08X\n", irq_get_raw_status(dev));
 	/* request IRQ */
 	ret = devm_request_irq(&pci_dev->dev, pci_dev->irq, capture_irq_handler,
 		IRQF_SHARED, dev->name, dev);
 	if (ret < 0) {
-		dev_err(&dev->pci->dev, "Error requesting IRQ %d \n", pci_dev->irq);
+		dev_err(&pci_dev->dev, "Error requesting IRQ %d \n", pci_dev->irq);
 		pci_dev->irq = -1;
 		goto fini_video;
 	}

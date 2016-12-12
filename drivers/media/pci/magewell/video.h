@@ -7,6 +7,7 @@
 #define __video_h
 
 #include "v4l2-sg-buf.h"
+#include "pcie-dma-desc-chain.h"
 
 void video_capture_SetIntEnables(struct mag_cap_dev *mdev,
 					unsigned long enable_bits);
@@ -208,6 +209,7 @@ struct xi_fmt {
 };
 
 
+#define VPP_REG_ADDR(i, off) (((i) == 0 ? VIDEO_REG_ADDR_VPP1_BASE : VIDEO_REG_ADDR_VPP2_BASE) + (off))
 
 #define MAX_WIDTH  2048
 #define MAX_HEIGHT 2160

@@ -9,13 +9,14 @@
 
 static int tw5864_video_input_init(struct tw5864_input *dev, int video_nr);
 static void tw5864_video_input_fini(struct tw5864_input *dev);
-static void tw5864_handle_frame_task(unsigned long data);
-static void tw5864_handle_frame(struct magdev_h264_frame *frame);
 static int tw5864_s_ctrl(struct v4l2_ctrl *ctrl);
 static void tw5864_frame_interval_set(struct tw5864_input *input);
+static int magewell_try_fmt_vid_cap(struct file *file, void *priv,
+		        struct v4l2_format *f);
 
-#define H264_VLC_BUF_SIZE 0x80000
-#define H264_MV_BUF_SIZE 0x2000 /* device writes 5396 bytes */
+
+#define H264_VLC_BUF_SIZE 0x100000
+#define H264_MV_BUF_SIZE 0x90000
 #define QP_VALUE 28
 #define MAX_GOP_SIZE 255
 #define GOP_SIZE MAX_GOP_SIZE
@@ -27,19 +28,24 @@ static const struct v4l2_ctrl_ops tw5864_ctrl_ops = {
         .s_ctrl = tw5864_s_ctrl,
 };
 
-//static int xi_open(struct file *file);
-static unsigned int xi_poll(struct file *file, struct poll_table_struct *wait);
+static int xi_open(struct file *file);
+//static unsigned int xi_poll(struct file *file, struct poll_table_struct *wait);
+static int xi_close(struct file *file);
+static int xi_mmap(struct file *file, struct vm_area_struct *vma);
+static long xi_ioctl(struct file *file, unsigned int cmd,
+		        unsigned long arg);
 
 static const struct v4l2_file_operations video_fops = {
         .owner = THIS_MODULE,
-        //.open = xi_open,
-        .open = v4l2_fh_open,
-        .release = vb2_fop_release,
+        .open = xi_open,
+        //.open = v4l2_fh_open,
+        //.release = vb2_fop_release,
+	.release = xi_close,
         .read = vb2_fop_read,
         //.poll = xi_poll,
         .poll = vb2_fop_poll,
-        .mmap = vb2_fop_mmap,
-        .unlocked_ioctl = video_ioctl2,
+        .mmap = xi_mmap,
+        .unlocked_ioctl = xi_ioctl,
 };
 
 
@@ -352,8 +358,6 @@ printk(" --> %s \n", __func__);
 	}
 
         inp->type = V4L2_INPUT_TYPE_CAMERA;
-        inp->std = TW5864_NORMS;
-
 	switch (input_type) {
 		case MWCAP_VIDEO_INPUT_TYPE_NONE:
 			name = "Auto";
@@ -465,18 +469,24 @@ static int tw5864_s_fmt_vid_cap(struct file *file, void *priv,
 				struct v4l2_format *f)
 {
 
+	struct xi_stream_pipe *pipe = file->private_data;
+	struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
+	int ret = 0;
 	char *name = "4:2:2, packed, YUYV";
 	
 printk(" --> %s \n", __func__);
 
-#if 0	
+
+	ret = magewell_try_fmt_vid_cap(file, priv, f);
+	if (ret < 0)
+		return ret;
+
 	s_v4l2->fmt = get_format(f);
 	s_v4l2->width = f->fmt.pix.width;
 	s_v4l2->height = f->fmt.pix.height;
-	//s_v4l2->vsq.field = f->fmt.pix.field;
+	s_v4l2->vsq.field = f->fmt.pix.field;
 	s_v4l2->stride = f->fmt.pix.bytesperline;
 	s_v4l2->image_size = f->fmt.pix.sizeimage;
-#endif
 
 	sprintf(name, "4:2:2, packed, YUYV");
 	printk("MageWell Capture: Set v4l2 format to %dx%d(%s)\n",
@@ -611,58 +621,32 @@ static int tw5864_enum_framesizes(struct file *file, void *priv,
 }
 
 
-
-
-static int tw5864_frameinterval_get(struct tw5864_input *input,
-                                    struct v4l2_fract *frameinterval)
+unsigned int enum_frameinterval_min = 166666;
+static int tw5864_enum_frameintervals(struct file *file, void *fh,
+                                      struct v4l2_frmivalenum *fival)
 {
+	int ret = 0;
 
-printk(" --> %s \n", __func__);
-        switch (input->std) {
-        case STD_NTSC:
-                frameinterval->numerator = 1001;
-                frameinterval->denominator = 30000;
-                break;
-        case STD_PAL:
-        case STD_SECAM:
-                frameinterval->numerator = 1;
-                frameinterval->denominator = 25;
-                break;
-        default:
-                WARN(1, "tw5864_frameinterval_get requested for unknown std %d\n",
-                     input->std);
-                return -EINVAL;
-        }
+	int i;
 
-        return 0;
-}
+	if (fival->index != 0)
+		return -EINVAL;
 
-static int tw5864_enum_frameintervals(struct file *file, void *priv,
-                                      struct v4l2_frmivalenum *fintv)
-{
-        struct tw5864_input *input = video_drvdata(file);
-        struct v4l2_fract frameinterval;
-        int std_max_fps = input->std == STD_NTSC ? 30 : 25;
-        struct v4l2_frmsizeenum fsize = { .index = fintv->index,
-                .pixel_format = fintv->pixel_format };
-        int ret;
-printk(" --> %s \n", __func__);
+	for (i = 0; i < ARRAY_SIZE(formats); i++) {
+		if (formats[i].fourcc == fival->pixel_format)
+			break;
+		if (i == ARRAY_SIZE(formats))
+			return -EINVAL;
+	}
 
-        ret = tw5864_enum_framesizes(file, priv, &fsize);
-        if (ret)
-                return ret;
-
-        if (fintv->width != fsize.discrete.width ||
-            fintv->height != fsize.discrete.height)
-                return -EINVAL;
-
-        fintv->type = V4L2_FRMIVAL_TYPE_STEPWISE;
-
-        ret = tw5864_frameinterval_get(input, &frameinterval);
-        fintv->stepwise.step = frameinterval;
-        fintv->stepwise.min = frameinterval;
-        fintv->stepwise.max = frameinterval;
-        fintv->stepwise.max.numerator *= std_max_fps;
+	fival->type = V4L2_FRMIVAL_TYPE_CONTINUOUS;
+	fival->stepwise.min.denominator = 10000000;
+	fival->stepwise.min.numerator =
+	    enum_frameinterval_min > 1000000 ? 1000000 : enum_frameinterval_min;
+	fival->stepwise.max.denominator = 10000000;
+	fival->stepwise.max.numerator = 10000000;
+	fival->stepwise.step.denominator = 10000000;
+	fival->stepwise.step.numerator = 1;
 
         return ret;
 }
@@ -671,48 +655,38 @@ printk(" --> %s \n", __func__);
 static int tw5864_g_parm(struct file *file, void *priv,
                          struct v4l2_streamparm *sp)
 {
-        struct tw5864_input *input = video_drvdata(file);
-        struct v4l2_captureparm *cp = &sp->parm.capture;
-        int ret;
+    struct xi_stream_pipe *pipe = file->private_data;
+    struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
+    struct v4l2_captureparm *cp = &sp->parm.capture;
+    
+    cp->capability = V4L2_CAP_TIMEPERFRAME;
+    cp->timeperframe.numerator = s_v4l2->frame_duration;
+    cp->timeperframe.denominator = 10000000;
+    
+    return 0;
 
-printk(" --> %s \n", __func__);
-        cp->capability = V4L2_CAP_TIMEPERFRAME;
-
-        ret = tw5864_frameinterval_get(input, &cp->timeperframe);
-        cp->timeperframe.numerator *= input->frame_interval; //TODO: or maybe 333333
-        cp->capturemode = 0;
-        cp->readbuffers = 2;
-
-        return ret;
 }
+
 
 static int tw5864_s_parm(struct file *file, void *priv,
                          struct v4l2_streamparm *sp)
 {
-        struct tw5864_input *input = video_drvdata(file);
-        struct v4l2_fract *t = &sp->parm.capture.timeperframe;
-        struct v4l2_fract time_base;
-        int ret;
+    struct xi_stream_pipe *pipe = file->private_data;
+    struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
+    struct v4l2_captureparm *cp = &sp->parm.capture;
 
-printk(" --> %s \n", __func__);
-        ret = tw5864_frameinterval_get(input, &time_base);
-        if (ret)
-                return ret;
+    printk(" ---%s \n", __func__);
+    if ((cp->timeperframe.numerator == 0) ||
+            (cp->timeperframe.denominator == 0)) {
+        /* reset framerate */
+        s_v4l2->frame_duration = 333333;
+    } else {
+        s_v4l2->frame_duration = (unsigned int)div_u64(10000000LL * cp->timeperframe.numerator,
+                cp->timeperframe.denominator);
+    }
 
-        if (!t->numerator || !t->denominator) {
-                t->numerator = time_base.numerator * input->frame_interval;
-                t->denominator = time_base.denominator;
-        } else if (t->denominator != time_base.denominator) {
-                t->numerator = t->numerator * time_base.denominator /
-                        t->denominator;
-                t->denominator = time_base.denominator;
-        }
+    return 0;
 
-        input->frame_interval = t->numerator / time_base.numerator;
-        if (input->frame_interval < 1)
-                input->frame_interval = 1;
-        tw5864_frame_interval_set(input);
-        return tw5864_g_parm(file, priv, sp);
 }
 
 static void tw5864_frame_interval_set(struct tw5864_input *input)
@@ -837,7 +811,7 @@ printk(" +++ start %s  \n", __func__);
     return 0;
 }
 
-#if 0
+#if 1
 static int magdev_reqbufs(struct file *file, void *priv,
         struct v4l2_requestbuffers *p)
 {
@@ -866,14 +840,344 @@ static int magdev_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
 
 #endif
 
+
+static int xi_mmap(struct file *file, struct vm_area_struct *vma)
+{
+    struct xi_stream_pipe *pipe = file->private_data;
+    int ret = 0;
+
+    printk("entering function %s\n", __func__);
+
+    down_read(&pipe->io_sem);
+    ret = v4l2_sg_buf_mmap(&pipe->s_v4l2.vsq, vma);
+    up_read(&pipe->io_sem);
+
+    return ret;
+}
+
+
+/*
+ * user get the video buffer status
+ * for mmap, get the map offset
+ * */
+
+static int magdev_qbuf(struct file *file, void *priv, struct v4l2_buffer *p)
+{   
+    struct xi_stream_pipe *pipe = file->private_data;
+    struct v4l2_sg_buf_queue *vsq = &pipe->s_v4l2.vsq;
+    printk("entering function %s\n", __func__);
+    
+    return v4l2_sg_queue_qbuf(vsq, p);
+}
+
+/*
+ * check if have available frame, if have no frame return <0;
+ * if block, it will wait until there is frame available, (vb->done event).
+ * if have frame, return 0 and transfer the buffer info to user.
+ * */
+static int magdev_dqbuf(struct file *file, void *priv, struct v4l2_buffer *p)
+{   
+    struct xi_stream_pipe *pipe = file->private_data;
+    struct v4l2_sg_buf_queue *vsq = &pipe->s_v4l2.vsq;
+    printk( "entering function %s\n", __func__);
+    
+    return v4l2_sg_queue_dqbuf(vsq, p, file->f_flags & O_NONBLOCK);
+}
+
+void video_capture_ReadFrame(
+		struct mag_cap_dev *dev,
+		int iPipeline)
+{
+
+   unsigned int dwFrameAddr = 0;
+   int cbStride = 0xb40;
+   int cx = 0x2d0;
+   int cy = 0x1e0;
+   int bLastStripe = 0x1;
+
+
+    pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_FBRD_ADDRESS), dwFrameAddr);
+    pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_FBRD_STRIDE), cbStride);
+    pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_FBRD_LINE_CONTROL),
+                    (cx * 4) | ((cy - 1) << 16) | (bLastStripe ? 0 : 0x80000000));
+    pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_FBRD_CONTROL), 0x01);
+
+}
+
+void video_capture_StopVideoPipeline(struct mag_cap_dev *dev, int iPipeline)
+{
+	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_CONTROL), 0x00);
+}
+
+//dev->vid_cap_addr
+void video_capture_StartVideoPipeline(
+		struct mag_cap_dev *dev,
+		int iPipeline,
+		int xScalePitch, int xInitialOffset,
+		int yScalePitch, int yInitialOffset,
+		int cxSrc, int cySrc,
+		int cyOut, int cxOut,
+		int xDest, int cxDest,
+		int yDest, int cyDest,
+		unsigned int dwControlValue)
+{
+	printk(" %s >> cxSrc = %d cySrc = %d cxDest = %d cyDest = %d \n", __func__, cxSrc, cySrc,
+			                        cxDest, cyDest);
+	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_SCALER_X_CONTROL), (xScalePitch & 0xFFFFF) | ((xInitialOffset & 0xFFF) << 20));
+	printk(" %s - yScalePitch = 0x%x yInitialOffset = 0x%x \n", __func__, yScalePitch, yInitialOffset);
+	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_SCALER_Y_CONTROL), (yScalePitch & 0xFFFFF) | ((yInitialOffset & 0xFFF) << 20));
+	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_SCALER_INPUT_SIZE), (cxSrc - 1) | ((cySrc - 1) << 16));
+
+	printk(" %s pciWR cyOut=0x%x cxOut=0x%x \n", __func__, cyOut, cxOut);
+	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_BORDER_SIZE), ((cyOut - 1) << 16) | (cxOut - 1));
+
+	printk(" %s pciWR2 xDest=0x%x cxDest=0x%x \n", __func__, xDest, cxDest);
+	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_BORDER_X_CONTROL), xDest | ((xDest + cxDest - 1) << 16));
+
+	printk(" %s pciWR3 yDest=0x%x cyDest=0x%x \n", __func__, yDest, cyDest);
+	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_BORDER_Y_CONTROL), yDest | ((yDest + cyDest - 1) << 16));
+
+	printk(" %s pciWR4 dwControl=0x%x \n", __func__, dwControlValue);
+	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_CONTROL), dwControlValue);
+
+}
+
+static void v4l2_process_one_frame(struct xi_stream_pipe *pipe, int iframe)
+{
+    struct v4l2_sg_buf *vbuf;
+
+    struct xi_stream_v4l2 *s_v4l2 = NULL;
+    struct mag_cap_dev *mdev = NULL;
+
+    int ret = -1;
+    bool bottom_up;
+    int ivpp = 0;
+
+printk(" ---> Entering %s \n", __func__);
+
+        s_v4l2 = &pipe->s_v4l2;
+
+        if (s_v4l2 == NULL)
+                printk(" S_V4L2 is NULL \n");
+
+        mdev = pipe->dev;
+
+        if (mdev == NULL)
+                printk("mag_cap_dev is NULL \n");
+
+
+
+
+    vbuf = v4l2_sg_queue_get_activebuf(&s_v4l2->vsq);
+    if (vbuf == NULL) {
+	printk(" %s: Active BUFF is NULL !! \n", __func__);
+        return;
+    }
+
+    if (vbuf->v4l2_buf.memory == V4L2_MEMORY_MMAP || vbuf->v4l2_buf.memory == V4L2_MEMORY_USERPTR) {
+	    printk(" %s - V4L2 Buff mem is MMAP or USERPTR \n", __func__);
+    }
+    
+    bottom_up = false;
+printk(" %s <<--- Enter \n", __func__);
+
+//JRM
+
+
+    ivpp = resource_pool_alloc_resource(&mdev->vpp_pool);
+    //xi_pcie_dma_controller_enable(&priv->vpp_dma_ctrl[ivpp]);
+    xi_pcie_dma_controller_enable(&mdev->vpp_dma_ctrl[ivpp]);
+    /*_sg_transfer_frame_to_host(pobj, ivpp, sgbuf, sgnum, stride, fourcc, cx, cy,
+        bpp, bottom_up, cyPartialNotify, &rect_target, timeout); */
+    {
+	RECT xfer_rect;
+	physical_addr_t phy_addr;
+	mw_scatterlist_t *sgbuf = vbuf->mwsg_list;
+	int sgnum = vbuf->mwsg_len;
+	u32 fourcc = 56595559;
+	int bpp = 16;
+	int cy_notify = 0;
+	bool bottom_up = false;
+	int cx = 720;
+	int cy = 576;
+	int stride = 0x5a0;
+
+
+
+	xfer_rect.right = 720;
+	xfer_rect.left = 0;
+	xfer_rect.top = 0;
+	xfer_rect.bottom = 576;
+	ret = xi_pcie_dma_desc_chain_build(&mdev->vpp_dma_chain[ivpp],
+		sgbuf, sgnum, fourcc, cx, cy, bpp, stride, bottom_up, cy_notify, &xfer_rect);
+
+	phy_addr = xi_pcie_dma_desc_chain_get_address(&mdev->vpp_dma_chain[ivpp]);
+
+printk(" %s DMA contr xfer chain addr_high=0x%x addr_low=0x%x  \n", __func__,
+                phy_addr.addr_high, phy_addr.addr_low);
+
+	xi_pcie_dma_controller_xfer_chain(&mdev->vpp_dma_ctrl[ivpp],
+            phy_addr.addr_high, phy_addr.addr_low,
+            xi_pcie_dma_desc_chain_get_first_block_desc_count(&mdev->vpp_dma_chain[ivpp]));
+
+	//_vpp_begin_get_frame(....)
+	video_capture_StartVideoPipeline(mdev, ivpp, 4096, 0, //xScalePitch, xInitialOffset
+			0xd55, 0, //yScalePitch, YInitialOffset
+			720, 480, //CxSrc, cySrc
+			0x240, 0x2d0, //cyOut, cxOut
+			0, 0x2d0, //xDest, cxDest
+			0, 0x240, //yDest, cyDest
+			0x25000001); //dwControl
+	video_capture_ReadFrame(mdev, ivpp);
+
+    }
+    
+	
+    //_vpp_end_get_frame(pobj, ivpp);
+    video_capture_StopVideoPipeline(mdev, ivpp);
+    xi_pcie_dma_controller_disable(&mdev->vpp_dma_ctrl[ivpp]);
+
+   //_free_vpp(pobj, ivpp);
+   resource_pool_free_resource(&mdev->vpp_pool, ivpp);
+
+    //for now hard code ret == 0
+    ret = 0;
+    vbuf->v4l2_buf.field = V4L2_FIELD_NONE;
+printk(" -%s- getTimeSTAMP \n", __func__);
+
+    v4l2_get_timestamp(&vbuf->v4l2_buf.timestamp);
+    if (ret == 0) {
+	    printk("    -> %s vBUF state = DONE \n", __func__);
+        vbuf->v4l2_buf.sequence++;
+        vbuf->state = V4L2_SG_BUF_STATE_DONE;
+    } else { /* timeout */
+        vbuf->state = V4L2_SG_BUF_STATE_ERROR;
+    }
+
+printk(" :%s: VBUF  sequence # %d , state %d \n", __func__, vbuf->v4l2_buf.sequence, vbuf->state);
+
+
+    v4l2_sg_queue_put_donebuf(&pipe->s_v4l2.vsq, vbuf);
+    //JRM
+    //Really we should be calling this:
+    //  vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+    //
+    //
+
+    return;
+}
+
+
+static int xi_v4l2_start_generating(struct xi_stream_pipe *pipe)
+{   
+    struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
+    int ret = -1;
+    
+    printk("entering function %s\n", __func__);
+    
+    if (test_and_set_bit(0, &s_v4l2->generating))
+        return -EBUSY;
+    
+    ret = v4l2_sg_queue_streamon(&s_v4l2->vsq);
+    if (ret != 0) {
+        goto err;
+    }
+   
+    /*** 
+    ret = xi_v4l2_start_thread(pipe);
+    if (ret != 0)
+        goto err;
+    
+    mw_stream_update_connection_format(&pipe->s_mw,
+                                   true,
+                                   v4l2_is_generating(s_v4l2),
+                                   s_v4l2->width,
+                                   s_v4l2->height,
+                                   fourcc_v4l2_to_mwcap(s_v4l2->fmt->fourcc),
+                                   s_v4l2->frame_duration
+                                   );
+    **/ 
+
+    v4l2_process_one_frame(pipe, 1);
+    printk( "returning from %s\n", __func__);
+    return 0;
+
+err:
+    v4l2_sg_queue_streamoff(&s_v4l2->vsq);
+    
+    clear_bit(0, &s_v4l2->generating);
+    return ret;
+}
+
+
+
+static int magdev_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
+{
+    struct xi_stream_pipe *pipe = file->private_data;
+
+    printk( "entering function %s\n", __func__);
+
+    if (i != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+        return -EINVAL;
+
+    return xi_v4l2_start_generating(pipe);
+}
+
+
+
+static void xi_v4l2_stop_generating(struct xi_stream_pipe *pipe)
+{
+    struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
+
+    printk( "entering function %s\n", __func__);
+
+    if (!test_and_clear_bit(0, &s_v4l2->generating))
+        return;
+
+    /* shutdown control thread 
+    xi_v4l2_stop_thread(pipe); **/
+
+    /* 先停止线程，再清理queued buffer。因为在线程中，request frame之前会把queued buffer删除掉,
+     * 但还没有给buffer设置状态，会认为这个buffer还是queued，会再次删除它，引起错误。 */
+    v4l2_sg_queue_streamoff(&s_v4l2->vsq);
+
+    /****
+    mw_stream_update_connection_format(&pipe->s_mw,
+                                   false,
+                                   v4l2_is_generating(s_v4l2),
+                                   s_v4l2->width,
+                                   s_v4l2->height,
+                                   fourcc_v4l2_to_mwcap(s_v4l2->fmt->fourcc),
+                                   s_v4l2->frame_duration
+                                   );
+	****/
+}
+
+
+static int magdev_streamoff(struct file *file, void *priv, enum v4l2_buf_type i)
+{
+    struct xi_stream_pipe *pipe = file->private_data;
+    printk( "entering function %s\n", __func__);
+
+    if (i != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+        return -EINVAL;
+
+    /* first kill thread, waiting for the delete queued buf */
+    xi_v4l2_stop_generating(pipe);
+
+    return 0;
+}
+
+
+
 static const struct v4l2_ioctl_ops video_ioctl_ops = {
         .vidioc_querycap = tw5864_querycap,
         .vidioc_enum_fmt_vid_cap = tw5864_enum_fmt_vid_cap,
-        .vidioc_reqbufs = vb2_ioctl_reqbufs,
+        .vidioc_reqbufs = magdev_reqbufs,
         .vidioc_create_bufs = vb2_ioctl_create_bufs,
-        .vidioc_querybuf = vb2_ioctl_querybuf,
-        .vidioc_qbuf = vb2_ioctl_qbuf,
-        .vidioc_dqbuf = vb2_ioctl_dqbuf,
+        .vidioc_querybuf = magdev_querybuf,
+        .vidioc_qbuf = magdev_qbuf,
+        .vidioc_dqbuf = magdev_dqbuf,
         .vidioc_expbuf = vb2_ioctl_expbuf,
         //.vidioc_querystd = tw5864_querystd,
         .vidioc_s_std = tw5864_s_std,
@@ -881,9 +1185,10 @@ static const struct v4l2_ioctl_ops video_ioctl_ops = {
         .vidioc_enum_input = magewell_enum_input,
         .vidioc_g_input = tw5864_g_input,
         .vidioc_s_input = tw5864_s_input,
-        .vidioc_streamon = vb2_ioctl_streamon,
-        .vidioc_streamoff = vb2_ioctl_streamoff,
+        .vidioc_streamon = magdev_streamon,
+        .vidioc_streamoff = magdev_streamoff,
         .vidioc_try_fmt_vid_cap = magewell_try_fmt_vid_cap,
+	.vidioc_reqbufs = magdev_reqbufs,
         .vidioc_s_fmt_vid_cap = tw5864_s_fmt_vid_cap,
         .vidioc_g_fmt_vid_cap = tw5864_g_fmt_vid_cap,
         .vidioc_log_status = v4l2_ctrl_log_status,
@@ -906,9 +1211,9 @@ static struct video_device tw5864_video_template = {
         .fops = &video_fops,
         .ioctl_ops = &video_ioctl_ops,
         .release = video_device_release_empty,
-        .tvnorms = TW5864_NORMS,
+        /*.tvnorms = TW5864_NORMS,
         .device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_READWRITE |
-                V4L2_CAP_STREAMING,
+                V4L2_CAP_STREAMING, */
 };
 
 
@@ -956,10 +1261,10 @@ int video_init(struct mag_cap_dev *dev, int *video_nr)
                 }
                 last_dma_allocated = i;
 
-		xi_pcie_dma_controller_xfer_chain(&dev->vpp_dma_ctrl[0],
+		/*xi_pcie_dma_controller_xfer_chain(&dev->vpp_dma_ctrl[0],
 				0, //DMA phys addr high
 				frame->vlc.dma_addr, //DMA phys addr low
-				1);
+				1);*/
 
         }
 
@@ -969,6 +1274,20 @@ int video_init(struct mag_cap_dev *dev, int *video_nr)
 	 *     addr.addr_high = sizeof(desc_phys) > 4 ? (desc_phys >> 32) & 0xFFFFFFFF : 0;
 	 *         addr.addr_low  = desc_phys & 0xFFFFFFFF;
 	 */
+
+	   /* video chain init */
+	for (i = 0; i < 2; i++) {
+		ret = xi_pcie_dma_desc_chain_init(&dev->vpp_dma_chain[i], 8192, dev->dma_priv);
+		if (ret != 0) {
+            		printk("%s: xi_pcie_dma_desc_chain_init error!\n", __func__);
+			return -ENOMEM;
+		}
+	}
+    	/* vpp resource pool */
+    	i = 2;
+    	ret = resource_pool_create(&dev->vpp_pool, i);
+    	if (ret != 0)
+        	return ret;
 
 	/* reset input */
 	
@@ -985,12 +1304,8 @@ int video_init(struct mag_cap_dev *dev, int *video_nr)
         spin_unlock_irqrestore(&dev->slock, flags);
 
 
-        tasklet_init(&dev->tasklet, tw5864_handle_frame_task,
-                     (unsigned long)dev);
-
         for (i = 0; i < NUM_INPUTS; i++) {
                 dev->inputs[i].root = dev;
-		dev->inputs[i].root->parent_dev = dev;
                 dev->inputs[i].nr = i;
                 ret = tw5864_video_input_init(&dev->inputs[i], video_nr[i]);
                 if (ret)
@@ -1004,7 +1319,6 @@ fini_video_inputs:
         for (i = last_input_nr_registered; i >= 0; i--)
                 tw5864_video_input_fini(&dev->inputs[i]);
 
-        tasklet_kill(&dev->tasklet);
 
 free_dma:
         for (i = last_dma_allocated; i >= 0; i--) {
@@ -1223,7 +1537,6 @@ static int tw5864_enable_input(struct tw5864_input *input)
 // Start clone video_capture_StartInput , hard coded values
 //    StartInput, Interlaced: 0, Pos: 260, 25, Size: 1280x720 
 
-
 	pci_write_reg32(mdev->vid_cap_addr+ VIDEO_REG_ADDR_INPUT_CLIP_X_CONTROL, 0x6030104);
 
 	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INPUT_CLIP_F0_Y_CONTROL, 0x2e80019);
@@ -1358,7 +1671,6 @@ static int tw5864_buf_prepare(struct vb2_buffer *vb)
         return 0;
 }
 
-#endif
 
 static int tw5864_start_streaming(struct vb2_queue *q, unsigned int count)
 {
@@ -1406,15 +1718,15 @@ printk(" %s <<<<< \n", __func__);
         spin_unlock_irqrestore(&input->slock, flags);
 }
 
-
+#endif
 
 static struct vb2_ops tw5864_video_qops = {
         .queue_setup = tw5864_queue_setup,
         .buf_queue = tw5864_buf_queue,
 	/*.buf_prepare = tw5864_buf_prepare,
-	.buf_finish     = tw5864_buf_finish, */
+	.buf_finish     = tw5864_buf_finish,
         .start_streaming = tw5864_start_streaming,
-        .stop_streaming = tw5864_stop_streaming,
+        .stop_streaming = tw5864_stop_streaming,*/
         .wait_prepare = vb2_ops_wait_prepare,
         .wait_finish = vb2_ops_wait_finish,
 };
@@ -1450,6 +1762,7 @@ static int tw5864_video_input_init(struct tw5864_input *input, int video_nr)
 
         input->vdev = tw5864_video_template;
         input->vdev.v4l2_dev = &input->root->v4l2_dev;
+	input->vdev.v4l2_dev->dev = &input->root->pci->dev;
         input->vdev.lock = &input->lock;
         input->vdev.queue = &input->vidq;
         video_set_drvdata(&input->vdev, input);
@@ -1530,7 +1843,6 @@ void tw5864_video_fini(struct mag_cap_dev *dev)
 {
         int i;
 
-        tasklet_kill(&dev->tasklet);
 
         for (i = 0; i < NUM_INPUTS; i++)
                 tw5864_video_input_fini(&dev->inputs[i]);
@@ -1546,156 +1858,39 @@ void tw5864_video_fini(struct mag_cap_dev *dev)
 }
 
 
-static void tw5864_handle_frame_task(unsigned long data)
-{
-        struct mag_cap_dev *dev = (struct mag_cap_dev *)data;
-        unsigned long flags;
-        int batch_size = H264_BUF_CNT;
-
-printk(" ++= %s +++ \n", __func__);
-
-        spin_lock_irqsave(&dev->slock, flags);
-        while (dev->h264_buf_r_index != dev->h264_buf_w_index && batch_size--) {
-                struct magdev_h264_frame *frame =
-                        &dev->h264_buf[dev->h264_buf_r_index];
-
-                spin_unlock_irqrestore(&dev->slock, flags);
-                dma_sync_single_for_cpu(&dev->pci->dev, frame->vlc.dma_addr,
-                                        H264_VLC_BUF_SIZE, DMA_FROM_DEVICE);
-                dma_sync_single_for_cpu(&dev->pci->dev, frame->mv.dma_addr,
-                                        H264_MV_BUF_SIZE, DMA_FROM_DEVICE);
-                tw5864_handle_frame(frame);
-                dma_sync_single_for_device(&dev->pci->dev, frame->vlc.dma_addr,
-                                           H264_VLC_BUF_SIZE, DMA_FROM_DEVICE);
-                dma_sync_single_for_device(&dev->pci->dev, frame->mv.dma_addr,
-                                           H264_MV_BUF_SIZE, DMA_FROM_DEVICE);
-                spin_lock_irqsave(&dev->slock, flags);
-
-                dev->h264_buf_r_index++;
-                dev->h264_buf_r_index %= H264_BUF_CNT;
-        }
-        spin_unlock_irqrestore(&dev->slock, flags);
-}
-
-
-static void tw5864_handle_frame(struct magdev_h264_frame *frame)
-{
-#define SKIP_VLCBUF_BYTES 3
-        struct tw5864_input *input = frame->input;
-        struct mag_cap_dev *dev = input->root;
-        struct tw5864_buf *vb;
-        struct vb2_v4l2_buffer *v4l2_buf;
-        int frame_len = frame->vlc_len - SKIP_VLCBUF_BYTES;
-        u8 *dst = input->buf_cur_ptr;
-        u8 tail_mask, vlc_mask = 0;
-        int i;
-        u8 vlc_first_byte = ((u8 *)(frame->vlc.addr + SKIP_VLCBUF_BYTES))[0];
-        unsigned long flags;
-        int zero_run;
-        u8 *src;
-        u8 *src_end;
-
-#ifdef DEBUG
-        /* if (frame->checksum !=
-            tw5864_vlc_checksum((u32 *)frame->vlc.addr, frame_len))
-                dev_err(&dev->pci->dev,
-                        "Checksum of encoded frame doesn't match!\n");
-	*/
-#endif
-
-
-        spin_lock_irqsave(&input->slock, flags);
-        vb = input->vb;
-        input->vb = NULL;
-        spin_unlock_irqrestore(&input->slock, flags);
-
-        v4l2_buf = to_vb2_v4l2_buffer(&vb->vb.vb2_buf);
-
-        if (!vb) { /* Gone because of disabling */
-                dev_dbg(&dev->pci->dev, "vb is empty, dropping frame\n");
-                return;
-        }
-
-        /*
-         * Check for space.
-         * Mind the overhead of startcode emulation prevention.
-         */
-        if (input->buf_cur_space_left < frame_len * 5 / 4) {
-                dev_err_once(&dev->pci->dev,
-                             "Left space in vb2 buffer, %d bytes, is less than considered safely enough to put frame of length %d. Dropping this frame.\n",
-                             input->buf_cur_space_left, frame_len);
-                return;
-        }
-
-        for (i = 0; i < 8 - input->tail_nb_bits; i++)
-                vlc_mask |= 1 << i;
-        tail_mask = (~vlc_mask) & 0xff;
-
-        dst[0] = (input->tail & tail_mask) | (vlc_first_byte & vlc_mask);
-        frame_len--;
-        dst++;
-
-
-        /* H.264 startcode emulation prevention */
-        src = frame->vlc.addr + SKIP_VLCBUF_BYTES + 1;
-        src_end = src + frame_len;
-        zero_run = 0;
-        for (; src < src_end; src++) {
-                if (zero_run < 2) {
-                        if (*src == 0)
-                                ++zero_run;
-                        else
-                                zero_run = 0;
-                } else {
-                        if ((*src & ~0x03) == 0)
-                                *dst++ = 0x03;
-                        zero_run = *src == 0;
-                }
-                *dst++ = *src;
-        }
-
-        vb2_set_plane_payload(&vb->vb.vb2_buf, 0,
-                              dst - (u8 *)vb2_plane_vaddr(&vb->vb.vb2_buf, 0));
-
-        vb->vb.vb2_buf.timestamp = frame->timestamp;
-        v4l2_buf->field = V4L2_FIELD_INTERLACED;
-        v4l2_buf->sequence = frame->seqno;
-
-#if 0
-	/* Check for motion... Is it supported?? */
-        if (frame->gop_seqno /* P-frame */ &&
-            tw5864_is_motion_triggered(frame)) {
-                struct v4l2_event ev = {
-                        .type = V4L2_EVENT_MOTION_DET,
-                        .u.motion_det = {
-                                .flags = V4L2_EVENT_MD_FL_HAVE_FRAME_SEQ,
-                                .frame_sequence = v4l2_buf->sequence,
-                        },
-                };
-
-                v4l2_event_queue(&input->vdev, &ev);
-        }
-#endif
-
-        vb2_buffer_done(&vb->vb.vb2_buf, VB2_BUF_STATE_DONE);
-
-	printk(" %s -- vb2_ BUFF done!! \n", __func__);
-}
-
-#if 0
+#if 1
 
 static int _stream_v4l2_init(struct xi_stream_pipe *pipe)
 {
-    struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
-    struct mag_cap_dev *dev = pipe->dev;
+    struct xi_stream_v4l2 *s_v4l2 = NULL;
+    struct mag_cap_dev *mdev = NULL;
+
+printk(" ---> Entering %s \n", __func__);
+
+	s_v4l2 = &pipe->s_v4l2;
+	
+	if (s_v4l2 == NULL)
+		printk(" S_V4L2 is NULL \n");
+
+	mdev = pipe->dev;
+
+	if (mdev == NULL)
+		printk("mag_cap_dev is NULL \n");
+
 
     s_v4l2->generating = 0;
     mutex_init(&s_v4l2->v4l2_mutex);
 
+
+    if (mdev->parent_dev == NULL)
+	    printk(" mdev Parent_dev NULL \n");
+
+    printk(" %s DevName: %s \n", __func__, dev_name(mdev->parent_dev));
+
     v4l2_sg_queue_init(&s_v4l2->vsq,
                        V4L2_BUF_TYPE_VIDEO_CAPTURE,
                        &s_v4l2->v4l2_mutex, // will unlock when dqbuf is waiting
-                       dev->parent_dev,
+                       mdev->parent_dev,
                        V4L2_FIELD_NONE
                        );
 
@@ -1722,7 +1917,9 @@ static int _stream_v4l2_init(struct xi_stream_pipe *pipe)
 
 static int xi_open(struct file *file)
 {
-    struct mag_cap_dev *dev = video_drvdata(file);
+    struct tw5864_input *input = video_drvdata(file);
+    //struct mag_cap_dev *dev = video_drvdata(file);
+    struct mag_cap_dev *mdev = NULL;
     struct xi_stream_pipe *pipe;
 
     printk( "entering function %s\n", __func__);
@@ -1734,14 +1931,27 @@ static int xi_open(struct file *file)
     if (pipe == NULL)
         return -ENOMEM;
 
-    pipe->dev = dev;
+    if (input->vdev.v4l2_dev == NULL)
+	    printk(" input vdev NULL \n");
+
+    if (input->vdev.v4l2_dev->dev == NULL)
+	    printk(" inp vdev v4l2_dev dev NULL \n");
+
+    if (input->root != NULL) {
+	    printk(" INPUT root _NOT_ null \n");
+	    pipe->dev = input->root;
+	    mdev = input->root;
+    }
 
     init_rwsem(&pipe->io_sem);
+
+    if (mdev->parent_dev == NULL)
+	    printk(" %s dev ParentDEV is NULL \n", __func__);
 
     _stream_v4l2_init(pipe);
 
     //dev->inputs[i].root ??
-    pipe->dev->dma_priv = dev->parent_dev;
+    pipe->dev->dma_priv = mdev->parent_dev;
 
 
     file->private_data = pipe;
@@ -1751,6 +1961,7 @@ static int xi_open(struct file *file)
 
 #endif
 
+#if 0
 static unsigned int xi_poll(struct file *file, struct poll_table_struct *wait)
 {
     struct xi_stream_pipe *pipe = file->private_data;
@@ -1763,11 +1974,78 @@ static unsigned int xi_poll(struct file *file, struct poll_table_struct *wait)
 
     mutex_lock(&s_v4l2->v4l2_mutex);
     //if (v4l2_is_generating(s_v4l2))
-    //    mask |= v4l2_sg_queue_poll(file, &s_v4l2->vsq, wait);
+    mask |= v4l2_sg_queue_poll(file, &s_v4l2->vsq, wait);
     mutex_unlock(&s_v4l2->v4l2_mutex);
 
     up_read(&pipe->io_sem);
 
     return mask;
+}
+
+#endif
+
+static int xi_close(struct file *file)
+{
+    struct video_device  *vdev = video_devdata(file);
+    struct xi_stream_pipe *pipe = file->private_data;
+    struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
+
+    printk("entering function %s\n", __func__);
+
+    down_write(&pipe->io_sem);
+
+    mutex_lock(&s_v4l2->v4l2_mutex);
+    //xi_v4l2_stop_generating(pipe);
+    mutex_unlock(&s_v4l2->v4l2_mutex);
+
+    //mw_stream_deinit(&pipe->s_mw);
+
+    v4l2_sg_queue_deinit(&s_v4l2->vsq);
+
+    up_write(&pipe->io_sem);
+
+    kfree(pipe);
+
+    file->private_data = NULL;
+
+    printk("close called (dev=%s)\n", video_device_node_name(vdev));
+    return 0;
+}
+
+static long _mw_stream_ioctl(struct file *file, unsigned int cmd, void *arg)
+{
+    struct xi_stream_pipe *pipe = file->private_data;
+    long ret = 0;
+
+    //ret = mw_stream_ioctl(&pipe->s_mw, cmd, arg);
+	printk(" !!! Calls to _MW_STREAM_IOCTL unsupported !!! \n");
+    return ret;
+}
+
+static long xi_ioctl(struct file *file, unsigned int cmd,
+        unsigned long arg)
+{   
+    struct xi_stream_pipe *pipe = file->private_data;
+    struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
+    long ret;
+
+printk(" ---> %s <--- \n", __func__); 
+    down_read(&pipe->io_sem);
+    
+    if (_IOC_TYPE(cmd) == _IOC_TYPE(VIDIOC_QUERYCAP)) {
+        mutex_lock(&s_v4l2->v4l2_mutex);
+        ret = video_ioctl2(file, cmd, arg);
+        mutex_unlock(&s_v4l2->v4l2_mutex);
+    } else {
+        ret = video_usercopy(file, cmd, arg, _mw_stream_ioctl);
+    }
+    
+    /* the return value of ioctl for user is int  */
+    if (ret > INT_MAX) {
+        ret = 1;
+    }
+    up_read(&pipe->io_sem);
+    
+    return ret;
 }
 

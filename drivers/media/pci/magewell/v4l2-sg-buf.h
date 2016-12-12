@@ -14,7 +14,7 @@
 
 #include "mw-sg.h"
 
-#define V4L2_SG_BUF_MAX_FRAME_SIZE	(64*1024*1024)
+#define V4L2_SG_BUF_MAX_FRAME_SIZE	(128*1024*1024)
 
 enum v4l2_sg_buf_state {
     V4L2_SG_BUF_STATE_DEQUEUED = 0,
