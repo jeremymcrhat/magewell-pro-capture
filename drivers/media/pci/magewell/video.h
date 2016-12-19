@@ -12,6 +12,8 @@
 void video_capture_SetIntEnables(struct mag_cap_dev *mdev,
 					unsigned long enable_bits);
 
+unsigned long video_capture_GetIntRawStatus(struct mag_cap_dev *mdev);
+void video_capture_ClearIntRawStatus(struct mag_cap_dev *mdev, unsigned long dwClearBits);
 
 enum VIDEO_REG_ADDR {
     VIDEO_REG_ADDR_VER_CAPS					= 4 * 0,
@@ -216,6 +218,39 @@ struct xi_fmt {
 #define MIN_WIDTH  48
 #define MIN_HEIGHT 32
 
+
+void v4l2_process_one_frame(struct xi_stream_pipe *pipe, int iframe);
+
+bool video_capture_GetInputFrameInfo(struct mag_cap_dev *vc, int * pnField, int * pnFieldIndex, int * pnFrameID);
+u32 xi_device_get_vfs_frame_count(struct mag_cap_dev *device);
+
+unsigned int video_capture_GetFullFrameBaseAddr(struct mag_cap_dev *vc, int iFrameID);
+
+u32 xi_device_get_vfs_full_buffer_address(struct mag_cap_dev *device);
+
+bool video_capture_GetVFSFullStripeInfo(
+        struct mag_cap_dev *vc,
+        int * pnField,
+        int * pnFieldIndex,
+        int * pnLineID,
+        int * pnFrameID
+        );
+
+bool video_capture_GetVFSFullFrameInfo(
+        struct mag_cap_dev *vc,
+        int * pnField,
+        int * pnFieldIndex,
+        int * pnFrameID);
+
+bool video_capture_GetVFSQuarterStripeInfo(
+        struct mag_cap_dev *vc,
+        int * pnLineID,
+        int * pnFrameID
+        );
+
+bool video_capture_GetVFSQuarterFrameInfo(
+                struct mag_cap_dev *vc,
+                int * pnFrameID);
 
 #endif
 

@@ -20,6 +20,11 @@ u32 irq_get_raw_status(struct mag_cap_dev *dev)
     return pci_read_reg32(dev->irq_ctrl+REG_ADDR_INT_RAW_STATUS);
 }
 
+void irq_set_raw_status(struct mag_cap_dev *dev, unsigned int dwClearBits)
+{
+	pci_write_reg32(dev->irq_ctrl+REG_ADDR_INT_RAW_STATUS, dwClearBits);
+}
+
 u32 irq_get_enabled_status(struct mag_cap_dev *dev)
 {
     return pci_read_reg32(dev->irq_ctrl+REG_ADDR_INT_STATUS);

@@ -35,6 +35,7 @@ enum VPP_INT_MASK {
 void irq_set_control(struct mag_cap_dev *dev, unsigned char enable);
 bool irq_is_timeout(struct mag_cap_dev *dev);
 u32 irq_get_raw_status(struct mag_cap_dev *dev);
+void irq_set_raw_status(struct mag_cap_dev *dev, unsigned int dwClearBits);
 u32 irq_get_enabled_status(struct mag_cap_dev *dev);
 u32 irq_get_enable_bits_value(struct mag_cap_dev *dev);
 void irq_set_enable_bits_value(struct mag_cap_dev *dev, u32 bits_val);

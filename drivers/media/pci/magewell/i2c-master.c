@@ -375,13 +375,13 @@ int xi_i2c_master_write_regs(struct xi_i2c_master *master,
     return ret;
 }
 
-static inline int adv761x_i2c_write(struct xi_i2c_master *dev,
+int adv761x_i2c_write(struct xi_i2c_master *dev,
         uint8_t devaddr, uint8_t regaddr, uint8_t val)
 {
     return xi_i2c_master_write(dev, dev->m_i2c_ch, devaddr, regaddr, val);
 }
 
-static inline u8 adv761x_i2c_read(struct xi_i2c_master *dev,
+inline u8 adv761x_i2c_read(struct xi_i2c_master *dev,
         uint8_t devaddr, uint8_t regaddr)
 {
     u8 val = 0;

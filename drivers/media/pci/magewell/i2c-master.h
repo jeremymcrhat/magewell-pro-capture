@@ -36,6 +36,12 @@ void adv761x_write_regs(struct xi_i2c_master *dev, const REGISTER_ITEM * pItems,
 
 u8 adv761x_i2c_read_regs(struct xi_i2c_master *dev, uint8_t devaddr, uint8_t regaddr, uint8_t *data, short count);
 
+int adv761x_i2c_write(struct xi_i2c_master *dev,
+        uint8_t devaddr, uint8_t regaddr, uint8_t val);
+
+inline u8 adv761x_i2c_read(struct xi_i2c_master *dev,
+        uint8_t devaddr, uint8_t regaddr);
+
 
 enum I2C_REG_ADDR {
     I2C_REG_ADDR_VER_CAPS                       = 4 * 0,

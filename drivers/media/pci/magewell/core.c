@@ -9,6 +9,8 @@
 #include "i2c-master.h"
 #include "video.h"
 
+#include "front-end.h"
+
 
 /* take first free /dev/videoX indexes by default */
 static unsigned int video_nr[] = {[0 ... (NUM_INPUTS - 1)] = -1 };
@@ -22,20 +24,80 @@ void tw5864_video_fini(struct mag_cap_dev *dev);
 //Get rid of this later
 int os_init(void);
 
+unsigned int video_capture_InterruptHandler(struct mag_cap_dev *dev, unsigned int dwStatus)
+{       
+    unsigned long long llNotifyMasks = 0;
+    unsigned int dwFrameStatus = 0;
+    int nLineID, nFrameID, nField, nFieldIndex;
+    bool bInfoValid = false;
 
+    nLineID = 0;
+    nFrameID = 0;
+    nField = 0;
+    nFieldIndex = 0;
+
+  
+	/* Call the various VideoField handlers */
+
+#if 1
+   //if (dwStatus & VPP_INT_MASK_INPUT_NEW_FIELD)
+   //     llNotifyMasks |= _InputNewFieldHandler(vc);
+
+    if (dwStatus & VPP_INT_MASK_VFS_FULL_STRIPE_DONE) {
+        //llNotifyMasks |= _VFSFullStripeDoneHandler(vc);
+	bInfoValid = video_capture_GetVFSFullStripeInfo(dev, &nField, &nFieldIndex, &nLineID, &nFrameID);
+    }
+	
+    if (dwStatus & VPP_INT_MASK_VFS_FULL_FIELD_DONE) {
+        //llNotifyMasks |= _VFSFullFieldDoneHandler(vc);
+	bInfoValid = video_capture_GetVFSFullFrameInfo(dev, &nField, &nFieldIndex, &nFrameID);
+    }
+
+    if (dwStatus & VPP_INT_MASK_VFS_QUARTER_STRIPE_DONE) {
+        //llNotifyMasks |= _VFSQuarterStripeDoneHandler(vc);
+	bInfoValid = video_capture_GetVFSQuarterStripeInfo(dev, &nLineID, &nFrameID);
+    }
+
+    if (dwStatus & VPP_INT_MASK_VFS_QUARTER_FRAME_DONE) {
+        //llNotifyMasks |= _VFSQuarterFrameDoneHandler(vc);
+	bInfoValid = video_capture_GetVFSQuarterFrameInfo(dev, &nFrameID);
+    }
+
+    if (bInfoValid) {
+	    dev->current_frame_id = nFrameID;
+	    dev->current_frame[nFrameID].line_id = nLineID;
+	    dev->current_frame[nFrameID].frame_id = nFrameID;
+	    dev->current_frame[nFrameID].field = nField;
+	    dev->current_frame[nFrameID].field_index = nFieldIndex;
+	    complete(&dev->frame_done);
+    }
+
+#endif
+	 
+    return llNotifyMasks; 
+}
 static irqreturn_t capture_irq_handler(int irq, void *dev_id)
 {
-
 	struct mag_cap_dev *dev = dev_id;
 	u32 status;
 	u32 response;
+	unsigned long flags;
+	bool cpld_tag_valid, intr_valid, desc_reader_busy;
+        u32 cpld_tag;
+	u32 vid_irq_raw;
+	int nFrameID = 0;
+
+
+	spin_lock_irqsave(&dev->slock, flags);
 
 	/* read IRQ status */
 	status = irq_get_enabled_status(dev);
 
-	printk(" IRQ_handler: Status=0x%x \n", status);
 	if (status == 0 || status == ~0)
+	{
+		spin_unlock_irqrestore(&dev->slock, flags);
 		return IRQ_HANDLED;
+	}
 
 	if (status & IRQ_MASK_I2C) {
 		//call irq i2c handler i2c_master_irq_handler_top
@@ -48,15 +110,62 @@ static irqreturn_t capture_irq_handler(int irq, void *dev_id)
 	if (status & IRQ_MASK_GPIO) {
 		printk(" : GPIO IRQ : \n");
 		irq_clear_enable_bits(dev, IRQ_MASK_GPIO);
-	};
+	}
 
 	if (status & IRQ_MASK_VID_CAPTURE) {
-		printk(" : vid cap IRQ : \n");
-		irq_clear_enable_bits(dev, IRQ_MASK_VID_CAPTURE);
-	};
+		//grab a frame
+		/*for (i = 0; i < NUM_INPUTS; i++) {
+			v4l2_process_one_frame(dev->inputs[i].pipe, 1);
+		} */
+		//tasklet_schedule(&dev->tasklet);
+		vid_irq_raw = video_capture_GetIntRawStatus(dev);
+		/*video_capture_ClearIntRawStatus(dev, vid_irq_raw);
+		irq_clear_enable_bits(dev, IRQ_MASK_VID_CAPTURE); */
+		video_capture_InterruptHandler(dev, vid_irq_raw);
 
-	//irq_set_enable_bits(dev, IRQ_MASK_VID_CAPTURE);
-	
+		if (vid_irq_raw & IRQ_MASK_VPP1_DMA) {
+			printk(" :: VPP1 DMA IRQ :: \n");
+			xi_pcie_dma_controller_clear_interrupt(&dev->vpp_dma_ctrl[0]);
+			
+			xi_pcie_dma_controller_get_status(&dev->vpp_dma_ctrl[0], &intr_valid,
+				&cpld_tag_valid, &desc_reader_busy, &cpld_tag);
+
+			 printk("  VPP1 IRQ DMA controller status == intr_valid: %d cpld_tag_valid: %d \
+				desc_busy %d cpld_tag: 0x%x \n", intr_valid,
+				cpld_tag_valid, desc_reader_busy, cpld_tag);
+			nFrameID = dev->current_frame_id;
+			if (cpld_tag != 0) {
+		            dev->current_frame[nFrameID].bFrameCompleted = ((cpld_tag & 0x80000000) != 0);
+            		    dev->current_frame[nFrameID].cyCompleted = (long)(cpld_tag & 0x7FFFFFFF);
+
+            		    if (dev->current_frame[nFrameID].bFrameCompleted)
+                		printk("  Frame COMPLETED! \n");
+
+
+			    printk(" nFrameID: %d Frame #%d cyCompleted= %u \n", nFrameID, dev->current_frame_id, dev->current_frame[nFrameID].cyCompleted);
+
+        		}
+
+		
+		//irq_set_enable_bits(dev, IRQ_MASK_VID_CAPTURE);
+
+		}
+
+		if (vid_irq_raw & IRQ_MASK_VPP2_DMA) {
+			printk(" :: VPP2 DMA IRQ :: \n");
+			//xi_pcie_dma_controller_clear_interrupt(&dev->vpp_dma_ctrl[1]);
+
+			
+			xi_pcie_dma_controller_get_status(&dev->vpp_dma_ctrl[1], &intr_valid,
+				&cpld_tag_valid, &desc_reader_busy, &cpld_tag);
+
+			 printk(" DMA controller status == intr_valid: %d cpld_tag_valid: %d \
+				desc_busy %d cpld_tag: 0x%x \n", intr_valid,
+				cpld_tag_valid, desc_reader_busy, cpld_tag);
+		}
+
+	}
+	spin_unlock_irqrestore(&dev->slock, flags);
 	return IRQ_HANDLED;
 }
 
@@ -135,6 +244,57 @@ void read_serial_num(struct mag_cap_dev *mdev, char *serial_no)
     serial_no[SERIAL_NO_LEN-1] = '\0';
 }
 
+int xi_device_get_temperature(struct mag_cap_dev *device)
+{   
+    int adc_code = (int)pci_read_reg32(device->dev_info+ DEV_REG_ADDR_DEVICE_TEMPERATURE);
+    return ((adc_code * 504 * 10) >> 12) - 2730;
+}
+
+
+static void _DeactiveEDID(struct mag_cap_dev *mdev)
+{
+        printk(" %s Disable clk term and disable EDID \n", __func__);
+        adv761x_i2c_write(&mdev->i2c_master, HDMI_MAP_ADDR, CLOCK_TERM_CTRL_REG, 0xFF);                // Disable clock termination
+        adv761x_i2c_write(&mdev->i2c_master, REPEATER_MAP_ADDR, HDCP_EDID_CONTROLS, 0x00);     // Disable EDID
+}
+
+
+static void _ActiveEDID(struct mag_cap_dev *mdev,
+        const unsigned char *pbyEDID, unsigned short cbEDID)
+{
+   	unsigned int i;
+
+        _DeactiveEDID(mdev);
+
+	//See g_abyEDID
+
+        for (i = 0; i < cbEDID; i++) {
+                adv761x_i2c_write(&mdev->i2c_master, EDID_MAP_ADDR, (unsigned char)i, g_EDID_items[i]);
+        }
+printk(" %s  Enable EDID and CLK termination \n", __func__);
+        adv761x_i2c_write(&mdev->i2c_master, REPEATER_MAP_ADDR, HDCP_EDID_CONTROLS, 0x01);     // Enable EDID
+        adv761x_i2c_write(&mdev->i2c_master, HDMI_MAP_ADDR, CLOCK_TERM_CTRL_REG, 0xFE);                // Enable clock termination
+}
+
+static void _SetupCSC(struct mag_cap_dev *mdev)
+{
+	unsigned char byReg02 = 0x7;
+
+	printk(" &&&& %s byReg02 0x%x \n", __func__, byReg02);
+	adv761x_i2c_write(&mdev->i2c_master, IO_MAP_ADDR, IO_REG_02_REG, byReg02);
+}
+
+
+static void _ApplyEDIDAndHDCP(struct mag_cap_dev *mdev)
+{
+	unsigned char EDID_val = 0x7ac83;
+	unsigned short EDID_Size = 0x100;
+	printk(" %s !!!!! \n", __func__);
+	printk(" %s AciveEDID being called \n", __func__);
+	_ActiveEDID(mdev,(unsigned char *) &EDID_val, EDID_Size);
+	adv761x_i2c_write(&mdev->i2c_master, HDMI_MAP_ADDR, HDMI_REGISTER_00H_REG, 0x88);
+}
+
 static int magwell_probe(struct pci_dev *pci_dev,
 			const struct pci_device_id *pci_id)
 {
@@ -208,12 +368,14 @@ static int magwell_probe(struct pci_dev *pci_dev,
 	pci_set_drvdata(pci_dev, dev);
 
 	spin_lock_init(&dev->slock);
+	mutex_init(&dev->capture_busy);
+	init_completion(&dev->frame_done);
 
-	hw_version = pci_read_reg32(dev->mmio + REG_ADDR_HARDWARE_VER);
-	firmware_version = pci_read_reg32(dev->mmio + REG_ADDR_FIRMWARE_VER);
+	hw_version = pci_read_reg32(dev->mmio + DEV_REG_ADDR_HARDWARE_VER);
+	firmware_version = pci_read_reg32(dev->mmio + DEV_REG_ADDR_FIRMWARE_VER);
 	dev_info(&pci_dev->dev, " Hardware version: 0x%x \n", hw_version);
 	dev_info(&pci_dev->dev, " Firmware version: 0x%x \n", firmware_version);
-	prod_id = (pci_read_reg32(dev->mmio + REG_ADDR_PRODUCT_ID));
+	prod_id = (pci_read_reg32(dev->mmio + DEV_REG_ADDR_PRODUCT_ID));
 
 	dev_info(&pci_dev->dev, " Product ID: 0x%x \n", prod_id);
 
@@ -288,7 +450,7 @@ static int magwell_probe(struct pci_dev *pci_dev,
 
 	
 	/* spi */
-	dev->freq_clk = pci_read_reg32(dev->mmio + REG_ADDR_REF_CLK_FREQ);
+	dev->freq_clk = pci_read_reg32(dev->mmio + DEV_REG_ADDR_REF_CLK_FREQ);
 	//dev_info(&pci_dev->dev, "  Frequency: 0x%lu \n", dev->freq_clk);
 
 	printk(" setting spi->reg_base \n");
@@ -335,15 +497,16 @@ static int magwell_probe(struct pci_dev *pci_dev,
 
 	dev->vid_cap_addr = dev->mmio + VID_CAPTURE_BASE_ADDR;
 
-	/**** 
-	* 
-	* xi_gpio_clear_data_bits(fadv761x->m_pGPIOMaster, GPIO_MASK_DVI_HPD);
-	* msleep(50);
-	* _ApplyEDIDAndHDCP(fadv761x);
-	* os_msleep(50);
-	* xi_gpio_set_data_bits(fadv761x->m_pGPIOMaster, GPIO_MASK_DVI_HPD);
-	*
-	*/
+
+
+
+	xi_gpio_clear_data_bits(&dev->xi_gpio, GPIO_MASK_DVI_HPD);
+	msleep(50);
+	_ApplyEDIDAndHDCP(dev);
+	msleep(50);
+	xi_gpio_set_data_bits(&dev->xi_gpio, GPIO_MASK_DVI_HPD);
+
+	 _SetupCSC(dev);
 
 	
 	/* timestamp init */
@@ -366,6 +529,7 @@ static int magwell_probe(struct pci_dev *pci_dev,
 	xi_pcie_dma_controller_init(&dev->vpp_dma_ctrl[0], dev->mmio + VPP1_DMA_BASE_ADDR);
 	xi_pcie_dma_controller_init(&dev->vpp_dma_ctrl[1], dev->mmio + VPP2_DMA_BASE_ADDR);
 
+	dev->dev_info = dev->mmio + DEV_INFO_BASE_ADDR;
 	
 	/* Initialize video */
 	ret = video_init(dev, video_nr); //video_capture_Initialize
@@ -393,7 +557,8 @@ static int magwell_probe(struct pci_dev *pci_dev,
 	dev->video_cap_enabled_int = VPP_INT_MASK_VFS_OVERFLOW | VPP_INT_MASK_INPUT_LOST_SYNC
 		| VPP_INT_MASK_INPUT_NEW_FIELD | VPP_INT_MASK_VFS_FULL_FIELD_DONE
 		| VPP_INT_MASK_VFS_QUARTER_FRAME_DONE | VPP_INT_MASK_VPP_WB_FBWR_DONE
-		| VPP_INT_MASK_VPP1_FBRD_DONE | VPP_INT_MASK_VPP2_FBRD_DONE;
+		| VPP_INT_MASK_VPP1_FBRD_DONE | VPP_INT_MASK_VPP2_FBRD_DONE
+		| VPP_INT_MASK_VFS_FULL_STRIPE_DONE | VPP_INT_MASK_VFS_QUARTER_STRIPE_DONE;
 
 	video_capture_SetIntEnables(dev, dev->video_cap_enabled_int);
 	irq_set_enable_bits(dev, IRQ_MASK_VID_CAPTURE);
@@ -404,6 +569,7 @@ static int magwell_probe(struct pci_dev *pci_dev,
 	printk(" IRQ enabled bits: %08X\n", irq_get_enable_bits_value(dev));
 	printk("IRQ enabled status: %08X\n", irq_get_enabled_status(dev));
 	printk(" IRQ raw status: %08X\n", irq_get_raw_status(dev));
+	printk("Device Temperature: %d\n", xi_device_get_temperature(dev));
 	/* request IRQ */
 	ret = devm_request_irq(&pci_dev->dev, pci_dev->irq, capture_irq_handler,
 		IRQF_SHARED, dev->name, dev);
@@ -447,6 +613,7 @@ static void magwell_cleanup(struct pci_dev *pci_dev)
 	/* unregister */
 	tw5864_video_fini(dev);
 
+	mutex_destroy(&dev->capture_busy);
 	/* release resources */
 	iounmap(dev->mmio);
 	release_mem_region(pci_resource_start(pci_dev, 0),

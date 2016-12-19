@@ -378,7 +378,7 @@ int v4l2_sg_queue_reqbufs(struct v4l2_sg_buf_queue *queue,
 {
     unsigned int count;
     int ret = 0;
-printk(" %s -> enter bufsize: %u \n", __func__);
+printk(" %s -> enter bufsize: %u \n", __func__, bufsize);
     if (req->memory != V4L2_MEMORY_MMAP
             && req->memory != V4L2_MEMORY_USERPTR
             ) {
@@ -797,6 +797,9 @@ int v4l2_sg_queue_streamoff(struct v4l2_sg_buf_queue *queue)
 struct v4l2_sg_buf *v4l2_sg_queue_get_activebuf(struct v4l2_sg_buf_queue *queue)
 {
     struct v4l2_sg_buf *vbuf = NULL;
+
+    if (queue == NULL)
+	    return NULL;
 
     spin_lock_bh(&queue->active_lock);
 

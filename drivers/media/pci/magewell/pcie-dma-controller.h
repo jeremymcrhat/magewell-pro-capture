@@ -25,4 +25,8 @@ void xi_pcie_dma_controller_xfer_chain(struct pcie_dma_controller *pobj,
         u32 chain_addr_high, u32 chain_addr_low,
         u32 desc_count);
 
+
+void xi_pcie_dma_controller_init(struct pcie_dma_controller *pobj, volatile void __iomem *baseaddr);
+
+
 #endif /* __PCIE_DMA_CONTROLLER_H__ */

@@ -5,6 +5,7 @@
 #include "common.h"
 #include "dev_support.h"
 #include "video.h"
+#include "irq-control.h"
 
 
 static int tw5864_video_input_init(struct tw5864_input *dev, int video_nr);
@@ -14,6 +15,8 @@ static void tw5864_frame_interval_set(struct tw5864_input *input);
 static int magewell_try_fmt_vid_cap(struct file *file, void *priv,
 		        struct v4l2_format *f);
 
+static void handle_frame_task(unsigned long data);
+static int tw5864_enable_input(struct tw5864_input *input);
 
 #define H264_VLC_BUF_SIZE 0x100000
 #define H264_MV_BUF_SIZE 0x90000
@@ -21,6 +24,7 @@ static int magewell_try_fmt_vid_cap(struct file *file, void *priv,
 #define MAX_GOP_SIZE 255
 #define GOP_SIZE MAX_GOP_SIZE
 #define TW5864_NORMS V4L2_STD_ALL
+#define MAX_FRAMES 6
 
 
 
@@ -316,7 +320,14 @@ printk(" --> %s  en_bits 0x%lx\n", __func__, enable_bits);
 void video_capture_SetControlPortValue(struct mag_cap_dev *mdev, unsigned long dwValue)
 {
 printk(" --> %s \n", __func__);
-    pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_CONTROL_PORT, dwValue);
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_CONTROL_PORT, dwValue);
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_CONTROL_PORT_SET, dwValue);
+}
+
+void video_capture_SetInputControl(struct mag_cap_dev *mdev, unsigned long dwValue)
+{
+printk(" ----->>>> %s \n", __func__);
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INPUT_CONTROL, dwValue);
 }
 
 
@@ -325,6 +336,16 @@ unsigned long video_capture_GetIntStatus(struct mag_cap_dev *mdev)
 
 printk(" --> %s \n", __func__);
     return pci_read_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INT_STATUS);
+}
+
+unsigned long video_capture_GetIntRawStatus(struct mag_cap_dev *mdev)
+{
+    return pci_read_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INT_RAW_STATUS);
+}
+
+void video_capture_ClearIntRawStatus(struct mag_cap_dev *mdev, unsigned long dwClearBits)
+{
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INT_RAW_STATUS, dwClearBits);
 }
 
 
@@ -469,7 +490,8 @@ static int tw5864_s_fmt_vid_cap(struct file *file, void *priv,
 				struct v4l2_format *f)
 {
 
-	struct xi_stream_pipe *pipe = file->private_data;
+	struct tw5864_input *input = file->private_data;
+	struct xi_stream_pipe *pipe = input->pipe;
 	struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
 	int ret = 0;
 	char *name = "4:2:2, packed, YUYV";
@@ -488,6 +510,7 @@ printk(" --> %s \n", __func__);
 	s_v4l2->stride = f->fmt.pix.bytesperline;
 	s_v4l2->image_size = f->fmt.pix.sizeimage;
 
+
 	sprintf(name, "4:2:2, packed, YUYV");
 	printk("MageWell Capture: Set v4l2 format to %dx%d(%s)\n",
             f->fmt.pix.width, f->fmt.pix.height,
@@ -501,7 +524,7 @@ static int tw5864_g_fmt_vid_cap(struct file *file, void *priv,
 {
         //struct tw5864_input *input = video_drvdata(file);
 	unsigned int width = 720;
-	unsigned int height = 576;
+	unsigned int height = 480;
 	int depth = 16;
 	unsigned long image_size = (width * height * depth + 7) >> 3; 
 
@@ -537,7 +560,6 @@ printk(" --> %s \n", __func__);
     f->fmt.pix.pixelformat  = V4L2_PIX_FMT_YUYV;
     f->fmt.pix.bytesperline = width; //s_v4l2->width; //s_v4l2->stride;
     f->fmt.pix.sizeimage    = image_size;//s_v4l2->image_size;
-
 
         return 0;
 }
@@ -655,7 +677,8 @@ static int tw5864_enum_frameintervals(struct file *file, void *fh,
 static int tw5864_g_parm(struct file *file, void *priv,
                          struct v4l2_streamparm *sp)
 {
-    struct xi_stream_pipe *pipe = file->private_data;
+	struct tw5864_input *input = file->private_data;
+    struct xi_stream_pipe *pipe = input->pipe;
     struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
     struct v4l2_captureparm *cp = &sp->parm.capture;
     
@@ -671,11 +694,11 @@ static int tw5864_g_parm(struct file *file, void *priv,
 static int tw5864_s_parm(struct file *file, void *priv,
                          struct v4l2_streamparm *sp)
 {
-    struct xi_stream_pipe *pipe = file->private_data;
+	struct tw5864_input *input = file->private_data;
+    struct xi_stream_pipe *pipe = input->pipe;
     struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
     struct v4l2_captureparm *cp = &sp->parm.capture;
 
-    printk(" ---%s \n", __func__);
     if ((cp->timeperframe.numerator == 0) ||
             (cp->timeperframe.denominator == 0)) {
         /* reset framerate */
@@ -758,7 +781,6 @@ static int magewell_try_fmt_vid_cap(struct file *file, void *priv,
     struct xi_fmt *fmt;
     enum v4l2_field field;
 
-printk(" +++ start %s  \n", __func__);
     fmt = get_format(f);
     if (!fmt) {
         pr_err("Fourcc format (0x%08x) invalid.\n",
@@ -815,7 +837,8 @@ printk(" +++ start %s  \n", __func__);
 static int magdev_reqbufs(struct file *file, void *priv,
         struct v4l2_requestbuffers *p)
 {
-    struct xi_stream_pipe *pipe = file->private_data;
+	struct tw5864_input *input = file->private_data;
+    struct xi_stream_pipe *pipe = input->pipe;
     struct v4l2_sg_buf_queue *vsq = &pipe->s_v4l2.vsq;
     struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
 
@@ -831,7 +854,8 @@ static int magdev_reqbufs(struct file *file, void *priv,
  * */
 static int magdev_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
 {
-    struct xi_stream_pipe *pipe = file->private_data;
+	struct tw5864_input *input = file->private_data;
+    struct xi_stream_pipe *pipe = input->pipe;
     struct v4l2_sg_buf_queue *vsq = &pipe->s_v4l2.vsq;
     printk("entering function %s\n", __func__);
 
@@ -843,7 +867,8 @@ static int magdev_querybuf(struct file *file, void *priv, struct v4l2_buffer *p)
 
 static int xi_mmap(struct file *file, struct vm_area_struct *vma)
 {
-    struct xi_stream_pipe *pipe = file->private_data;
+	struct tw5864_input *input = file->private_data;
+    struct xi_stream_pipe *pipe = input->pipe;
     int ret = 0;
 
     printk("entering function %s\n", __func__);
@@ -863,7 +888,8 @@ static int xi_mmap(struct file *file, struct vm_area_struct *vma)
 
 static int magdev_qbuf(struct file *file, void *priv, struct v4l2_buffer *p)
 {   
-    struct xi_stream_pipe *pipe = file->private_data;
+	struct tw5864_input *input = file->private_data;
+    struct xi_stream_pipe *pipe = input->pipe;
     struct v4l2_sg_buf_queue *vsq = &pipe->s_v4l2.vsq;
     printk("entering function %s\n", __func__);
     
@@ -877,7 +903,8 @@ static int magdev_qbuf(struct file *file, void *priv, struct v4l2_buffer *p)
  * */
 static int magdev_dqbuf(struct file *file, void *priv, struct v4l2_buffer *p)
 {   
-    struct xi_stream_pipe *pipe = file->private_data;
+	struct tw5864_input *input = file->private_data;
+    struct xi_stream_pipe *pipe = input->pipe;
     struct v4l2_sg_buf_queue *vsq = &pipe->s_v4l2.vsq;
     printk( "entering function %s\n", __func__);
     
@@ -886,15 +913,21 @@ static int magdev_dqbuf(struct file *file, void *priv, struct v4l2_buffer *p)
 
 void video_capture_ReadFrame(
 		struct mag_cap_dev *dev,
-		int iPipeline)
+		int iPipeline,
+		int iFrame,
+		bool bLastStripe)
 {
 
    unsigned int dwFrameAddr = 0;
-   int cbStride = 0xb40;
-   int cx = 0x2d0;
-   int cy = 0x1e0;
-   int bLastStripe = 0x1;
+   int cbStride = 0x1400;
+   int cx = 480;
+   int cy = 720;
 
+/**** xi_driver_sg_get_frame to IRQ_VPP1_DMA  is 366.311041 to 366.316017 ***/
+   dwFrameAddr = video_capture_GetFullFrameBaseAddr(dev, iFrame);
+   cbStride = 0x1400;
+
+   printk("%s FrameAddr 0x%x iFrame=%d \n", __func__, dwFrameAddr, iFrame); 
 
     pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_FBRD_ADDRESS), dwFrameAddr);
     pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_FBRD_STRIDE), cbStride);
@@ -921,12 +954,27 @@ void video_capture_StartVideoPipeline(
 		int yDest, int cyDest,
 		unsigned int dwControlValue)
 {
+
+	        // Setup scaler
+        xScalePitch = cxSrc * 4096 / cxDest;
+        yScalePitch = cySrc * 4096 / cyDest;
+        xInitialOffset = cxSrc < cxDest ? 0 : (cxSrc - cxDest) * 2048 / cxDest;
+        yInitialOffset = cySrc < cyDest ? 0 : (cySrc - cyDest) * 2048 / cyDest;
+
+
+
 	printk(" %s >> cxSrc = %d cySrc = %d cxDest = %d cyDest = %d \n", __func__, cxSrc, cySrc,
 			                        cxDest, cyDest);
+
+	printk(" %s - reg_base 0x%x iPipeline %d SCALER_X_cntr = %d xScalePitch=%d xInitialOffset= %d \n",
+		       	__func__, dev->vid_cap_addr, iPipeline, VPP_REG_OFFSET_SCALER_X_CONTROL, xScalePitch, xInitialOffset);
+
 	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_SCALER_X_CONTROL), (xScalePitch & 0xFFFFF) | ((xInitialOffset & 0xFFF) << 20));
 	printk(" %s - yScalePitch = 0x%x yInitialOffset = 0x%x \n", __func__, yScalePitch, yInitialOffset);
 	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_SCALER_Y_CONTROL), (yScalePitch & 0xFFFFF) | ((yInitialOffset & 0xFFF) << 20));
 	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_SCALER_INPUT_SIZE), (cxSrc - 1) | ((cySrc - 1) << 16));
+
+//Setup border
 
 	printk(" %s pciWR cyOut=0x%x cxOut=0x%x \n", __func__, cyOut, cxOut);
 	pci_write_reg32(dev->vid_cap_addr+VPP_REG_ADDR(iPipeline, VPP_REG_OFFSET_BORDER_SIZE), ((cyOut - 1) << 16) | (cxOut - 1));
@@ -942,18 +990,20 @@ void video_capture_StartVideoPipeline(
 
 }
 
-static void v4l2_process_one_frame(struct xi_stream_pipe *pipe, int iframe)
+void v4l2_process_one_frame(struct xi_stream_pipe *pipe, int iframe)
 {
     struct v4l2_sg_buf *vbuf;
 
     struct xi_stream_v4l2 *s_v4l2 = NULL;
     struct mag_cap_dev *mdev = NULL;
 
+    int nFrameID=0;
     int ret = -1;
     bool bottom_up;
     int ivpp = 0;
 
-printk(" ---> Entering %s \n", __func__);
+	if (pipe == NULL)
+		return;
 
         s_v4l2 = &pipe->s_v4l2;
 
@@ -962,15 +1012,14 @@ printk(" ---> Entering %s \n", __func__);
 
         mdev = pipe->dev;
 
-        if (mdev == NULL)
-                printk("mag_cap_dev is NULL \n");
-
+        if (mdev == NULL) {
+		return;
+	}
 
 
 
     vbuf = v4l2_sg_queue_get_activebuf(&s_v4l2->vsq);
     if (vbuf == NULL) {
-	printk(" %s: Active BUFF is NULL !! \n", __func__);
         return;
     }
 
@@ -985,7 +1034,6 @@ printk(" %s <<--- Enter \n", __func__);
 
 
     ivpp = resource_pool_alloc_resource(&mdev->vpp_pool);
-    //xi_pcie_dma_controller_enable(&priv->vpp_dma_ctrl[ivpp]);
     xi_pcie_dma_controller_enable(&mdev->vpp_dma_ctrl[ivpp]);
     /*_sg_transfer_frame_to_host(pobj, ivpp, sgbuf, sgnum, stride, fourcc, cx, cy,
         bpp, bottom_up, cyPartialNotify, &rect_target, timeout); */
@@ -996,43 +1044,92 @@ printk(" %s <<--- Enter \n", __func__);
 	int sgnum = vbuf->mwsg_len;
 	u32 fourcc = 56595559;
 	int bpp = 16;
-	int cy_notify = 0;
+	int cy_notify = 1;
 	bool bottom_up = false;
 	int cx = 720;
-	int cy = 576;
+	int cy = 480;
 	int stride = 0x5a0;
-
-
+	int frame_count = 0;
+	int nLineID=0;
+	bool bInfoValid = false;
+	unsigned int timeout;
 
 	xfer_rect.right = 720;
 	xfer_rect.left = 0;
 	xfer_rect.top = 0;
-	xfer_rect.bottom = 576;
+	xfer_rect.bottom = 480;
+
+	frame_count = xi_device_get_vfs_frame_count(mdev);
+	printk(" %s Checking current frame count = %d \n", __func__, frame_count);
+	printk(" %s > building PCIe dma desc chain \n", __func__);
+	printk("       sgnum=%d fourcc=%d cx=%d cy=%d bpp=%d cy_notify=%d \n",
+			                sgnum, fourcc, cx, cy, bpp, cy_notify);
+
 	ret = xi_pcie_dma_desc_chain_build(&mdev->vpp_dma_chain[ivpp],
 		sgbuf, sgnum, fourcc, cx, cy, bpp, stride, bottom_up, cy_notify, &xfer_rect);
 
 	phy_addr = xi_pcie_dma_desc_chain_get_address(&mdev->vpp_dma_chain[ivpp]);
 
-printk(" %s DMA contr xfer chain addr_high=0x%x addr_low=0x%x  \n", __func__,
-                phy_addr.addr_high, phy_addr.addr_low);
+printk(" %s DMA contr xfer chain addr_high=0x%x addr_low=0x%x count=%d  \n", __func__,
+                phy_addr.addr_high, phy_addr.addr_low, xi_pcie_dma_desc_chain_get_first_block_desc_count(&mdev->vpp_dma_chain[ivpp]));
 
 	xi_pcie_dma_controller_xfer_chain(&mdev->vpp_dma_ctrl[ivpp],
             phy_addr.addr_high, phy_addr.addr_low,
             xi_pcie_dma_desc_chain_get_first_block_desc_count(&mdev->vpp_dma_chain[ivpp]));
 
 	//_vpp_begin_get_frame(....)
-	video_capture_StartVideoPipeline(mdev, ivpp, 4096, 0, //xScalePitch, xInitialOffset
-			0xd55, 0, //yScalePitch, YInitialOffset
-			720, 480, //CxSrc, cySrc
-			0x240, 0x2d0, //cyOut, cxOut
-			0, 0x2d0, //xDest, cxDest
-			0, 0x240, //yDest, cyDest
+	video_capture_StartVideoPipeline(mdev, ivpp, 7281, 1592, //xScalePitch, xInitialOffset
+			0x1800, 0x400, //yScalePitch, YInitialOffset
+			1280, 720, //CxSrc, cySrc
+			480, 720, //cyOut, cxOut
+			0, 720, //xDest, cxDest
+			0, 480, //yDest, cyDest
 			0x25000001); //dwControl
-	video_capture_ReadFrame(mdev, ivpp);
+
+another_partial_frame:
+	printk(" Checking to see if any frames are completed \n");
+	for(nFrameID = 0; nFrameID<4; nFrameID++) {
+		printk("    checking frameID #%d for completion \n", nFrameID);
+		if (mdev->current_frame[nFrameID].bFrameCompleted) {
+			printk("      Frame #%d completed!! \n", nFrameID);
+			goto finish_processing_frame;
+		}
+		if (mdev->current_frame[nFrameID].cyCompleted >= cy) {
+			printk("    Frame #%d completed number lines %d \n", nFrameID, mdev->current_frame[nFrameID].cyCompleted);
+			goto finish_processing_frame;
+		}
+	}
+	//JRM Maybe use video_capture_IsFrameReaderBusy insteadC
+	printk(" Spinning to wait for FrameInfo from capture \n");
+	/* Spin waiting for the frame to finish */
+
+	printk(" +s+ ");
+	timeout = wait_for_completion_interruptible_timeout(&mdev->frame_done, HZ/2);
+	if (timeout == -ETIMEDOUT) {
+		printk(" Error getting complete message from ISR\n");
+	} else {
+		nFrameID = mdev->current_frame_id;
+		printk(" Frame details [ line_id=%d frame_id=%d field=%d field_index=%d ]\n",
+				mdev->current_frame[nFrameID].line_id, mdev->current_frame[nFrameID].frame_id, mdev->current_frame[nFrameID].field,
+				mdev->current_frame[nFrameID].field_index);
+	}
+
+	if (!mdev->current_frame[nFrameID].bFrameCompleted || (mdev->current_frame[nFrameID].cyCompleted < cy) ) {
+		printk("    .... Still processing Frame ...... \n");
+		video_capture_ReadFrame(mdev, ivpp, nFrameID, false);
+		reinit_completion(&mdev->frame_done);
+		goto another_partial_frame;
+	}
+
+
+	/* TODO - need a way to figure out how to do FULL Frame vs OUARTER FRAME */
 
     }
-    
-	
+   
+finish_processing_frame: 
+	printk("  Finished full frame.  Calling readFrame\n");
+	video_capture_ReadFrame(mdev, ivpp, nFrameID, true);
+
     //_vpp_end_get_frame(pobj, ivpp);
     video_capture_StopVideoPipeline(mdev, ivpp);
     xi_pcie_dma_controller_disable(&mdev->vpp_dma_ctrl[ivpp]);
@@ -1098,7 +1195,9 @@ static int xi_v4l2_start_generating(struct xi_stream_pipe *pipe)
                                    );
     **/ 
 
-    v4l2_process_one_frame(pipe, 1);
+    if (pipe->dev != NULL) {
+	v4l2_process_one_frame(pipe, 1);
+    }
     printk( "returning from %s\n", __func__);
     return 0;
 
@@ -1113,13 +1212,22 @@ err:
 
 static int magdev_streamon(struct file *file, void *priv, enum v4l2_buf_type i)
 {
-    struct xi_stream_pipe *pipe = file->private_data;
+	struct tw5864_input *input = file->private_data;
+    struct xi_stream_pipe *pipe = input->pipe;
+    int ret = 0;
 
     printk( "entering function %s\n", __func__);
 
     if (i != V4L2_BUF_TYPE_VIDEO_CAPTURE)
         return -EINVAL;
 
+    if (!input->root->enabled) {
+	ret = tw5864_enable_input(input);
+    }
+    if (ret) {
+	    printk(" ERROR enabling input \n");
+	    return -ENODEV;
+    }
     return xi_v4l2_start_generating(pipe);
 }
 
@@ -1156,7 +1264,8 @@ static void xi_v4l2_stop_generating(struct xi_stream_pipe *pipe)
 
 static int magdev_streamoff(struct file *file, void *priv, enum v4l2_buf_type i)
 {
-    struct xi_stream_pipe *pipe = file->private_data;
+	struct tw5864_input *input = file->private_data;
+    struct xi_stream_pipe *pipe = input->pipe;
     printk( "entering function %s\n", __func__);
 
     if (i != V4L2_BUF_TYPE_VIDEO_CAPTURE)
@@ -1234,6 +1343,8 @@ int video_init(struct mag_cap_dev *dev, int *video_nr)
 
 	spin_lock_irqsave(&dev->slock, flags);
 
+	dev->enabled = 0;
+
         for (i = 0; i < H264_BUF_CNT; i++) {
                 struct magdev_h264_frame *frame = &dev->h264_buf[i];
 
@@ -1277,17 +1388,20 @@ int video_init(struct mag_cap_dev *dev, int *video_nr)
 
 	   /* video chain init */
 	for (i = 0; i < 2; i++) {
-		ret = xi_pcie_dma_desc_chain_init(&dev->vpp_dma_chain[i], 8192, dev->dma_priv);
+		ret = xi_pcie_dma_desc_chain_init(&dev->vpp_dma_chain[i], (8192*2), dev->dma_priv);
 		if (ret != 0) {
             		printk("%s: xi_pcie_dma_desc_chain_init error!\n", __func__);
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto free_dma;
 		}
 	}
     	/* vpp resource pool */
     	i = 2;
     	ret = resource_pool_create(&dev->vpp_pool, i);
-    	if (ret != 0)
-        	return ret;
+    	if (ret != 0) {
+        	ret = -ENOMEM;
+		goto free_dma;
+	}
 
 	/* reset input */
 	
@@ -1303,6 +1417,8 @@ int video_init(struct mag_cap_dev *dev, int *video_nr)
                   dev->h264_buf[dev->h264_buf_w_index].mv.dma_addr); */
         spin_unlock_irqrestore(&dev->slock, flags);
 
+	tasklet_init(&dev->tasklet, handle_frame_task,
+			                     (unsigned long)dev);
 
         for (i = 0; i < NUM_INPUTS; i++) {
                 dev->inputs[i].root = dev;
@@ -1319,6 +1435,7 @@ fini_video_inputs:
         for (i = last_input_nr_registered; i >= 0; i--)
                 tw5864_video_input_fini(&dev->inputs[i]);
 
+	tasklet_kill(&dev->tasklet);
 
 free_dma:
         for (i = last_dma_allocated; i >= 0; i--) {
@@ -1332,8 +1449,6 @@ free_dma:
 
         return ret;
 
-
-	return 0;
 }
 
 
@@ -1451,8 +1566,10 @@ static int tw5864_enable_input(struct tw5864_input *input)
         int downscale_enabled = 0;
 	bool cpld_tag_valid, intr_valid, desc_reader_busy;
 	u32 cpld_tag;
+	
 	printk(" Enabling channel %d\n", input->nr);
         //dev_dbg(&dev->pci->dev, "Enabling channel %d\n", nr);
+
 
         input->frame_seqno = 0;
         input->frame_gop_seqno = 0;
@@ -1461,6 +1578,7 @@ static int tw5864_enable_input(struct tw5864_input *input)
 
 	if (input->root == NULL) {
 		printk(" [%s] input->root is NULL \n", __func__);
+		return -ENODEV;
 	}
 	mdev = input->root;
 
@@ -1534,6 +1652,11 @@ static int tw5864_enable_input(struct tw5864_input *input)
                 //tw_clearl(TW5864_FULL_HALF_FLAG, 1 << nr);
                 break;
         }
+
+
+	printk("    Setting vid_input_cntrl to 0000\n");
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INPUT_CONTROL, 0x0);
+
 // Start clone video_capture_StartInput , hard coded values
 //    StartInput, Interlaced: 0, Pos: 260, 25, Size: 1280x720 
 
@@ -1561,21 +1684,25 @@ static int tw5864_enable_input(struct tw5864_input *input)
 	dwValue |= ((nStartFrameId & 0x0F) << 8);
 	dwValue |= (cyInterlacedFramePacking << 16);
 */
-	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INPUT_CONTROL, 0x9);
 
-	xi_pcie_dma_controller_enable(&mdev->vpp_dma_ctrl[0]);
-	xi_pcie_dma_controller_enable(&mdev->vpp_dma_ctrl[1]);
+
+	pci_write_reg32(mdev->vid_cap_addr + VIDEO_REG_ADDR_INPUT_CONTROL, 0x9);
 
 	xi_pcie_dma_controller_get_status(&mdev->vpp_dma_ctrl[0], &intr_valid,
 			&cpld_tag_valid, &desc_reader_busy, &cpld_tag); 
 
-	printk(" DMA controller status == intr_valid: %d cpld_tag_valid: %d \
-			desc_busy %d cpld_tag: 0x%x \n", intr_valid,
+	printk(" %s DMA controller status == intr_valid: %d cpld_tag_valid: %d \
+			desc_busy %d cpld_tag: 0x%x \n", __func__, intr_valid,
 			cpld_tag_valid, desc_reader_busy, cpld_tag);
 
         spin_lock_irqsave(&mdev->slock, flags);
         input->enabled = 1;
+	mdev->enabled = 1;
         spin_unlock_irqrestore(&mdev->slock, flags);
+
+	printk("    Set CNTRL to 3\n");
+	video_capture_SetControlPortValue(mdev, 0x3);
+
         return 0;
 }
 
@@ -1819,6 +1946,7 @@ static int tw5864_video_input_init(struct tw5864_input *input, int video_nr)
         input->std = STD_NTSC;
 
 
+
         return 0;
 
 free_v4l2_hdl:
@@ -1843,6 +1971,7 @@ void tw5864_video_fini(struct mag_cap_dev *dev)
 {
         int i;
 
+	tasklet_kill(&dev->tasklet);
 
         for (i = 0; i < NUM_INPUTS; i++)
                 tw5864_video_input_fini(&dev->inputs[i]);
@@ -1920,12 +2049,14 @@ static int xi_open(struct file *file)
     struct tw5864_input *input = video_drvdata(file);
     //struct mag_cap_dev *dev = video_drvdata(file);
     struct mag_cap_dev *mdev = NULL;
-    struct xi_stream_pipe *pipe;
+    struct xi_stream_pipe *pipe = NULL;
 
     printk( "entering function %s\n", __func__);
 
-    if (file->private_data != NULL)
+    if (file->private_data != NULL) {
+	    printk(" Error input->pipe is not null!\n");
         return -EFAULT;
+    }
 
     pipe = kzalloc(sizeof(*pipe), GFP_KERNEL);
     if (pipe == NULL)
@@ -1953,8 +2084,9 @@ static int xi_open(struct file *file)
     //dev->inputs[i].root ??
     pipe->dev->dma_priv = mdev->parent_dev;
 
+    input->pipe = pipe;
 
-    file->private_data = pipe;
+    file->private_data = input;
 
     return 0;
 }
@@ -1987,7 +2119,8 @@ static unsigned int xi_poll(struct file *file, struct poll_table_struct *wait)
 static int xi_close(struct file *file)
 {
     struct video_device  *vdev = video_devdata(file);
-    struct xi_stream_pipe *pipe = file->private_data;
+    struct tw5864_input *input = file->private_data;
+    struct xi_stream_pipe *pipe = input->pipe;
     struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
 
     printk("entering function %s\n", __func__);
@@ -2014,7 +2147,8 @@ static int xi_close(struct file *file)
 
 static long _mw_stream_ioctl(struct file *file, unsigned int cmd, void *arg)
 {
-    struct xi_stream_pipe *pipe = file->private_data;
+	//struct tw5864_input *input = file->private_data;
+    //struct xi_stream_pipe *pipe = input->pipe;
     long ret = 0;
 
     //ret = mw_stream_ioctl(&pipe->s_mw, cmd, arg);
@@ -2024,12 +2158,12 @@ static long _mw_stream_ioctl(struct file *file, unsigned int cmd, void *arg)
 
 static long xi_ioctl(struct file *file, unsigned int cmd,
         unsigned long arg)
-{   
-    struct xi_stream_pipe *pipe = file->private_data;
+{  
+    struct tw5864_input *input = file->private_data;	
+    struct xi_stream_pipe *pipe = input->pipe;
     struct xi_stream_v4l2 *s_v4l2 = &pipe->s_v4l2;
     long ret;
 
-printk(" ---> %s <--- \n", __func__); 
     down_read(&pipe->io_sem);
     
     if (_IOC_TYPE(cmd) == _IOC_TYPE(VIDIOC_QUERYCAP)) {
@@ -2047,5 +2181,207 @@ printk(" ---> %s <--- \n", __func__);
     up_read(&pipe->io_sem);
     
     return ret;
+}
+
+
+
+static void handle_frame_task(unsigned long data)
+{
+        struct mag_cap_dev *dev = (struct mag_cap_dev *)data;
+        unsigned long flags;
+	int i;
+
+        spin_lock_irqsave(&dev->slock, flags);
+                //tw5864_handle_frame(frame);
+	for (i = 0; i < NUM_INPUTS; i++) {
+		v4l2_process_one_frame(dev->inputs[i].pipe, 1);
+	}
+        spin_unlock_irqrestore(&dev->slock, flags);
+}
+
+
+
+u32 mag_cap_dev_get_memory_size(struct mag_cap_dev *device)
+{
+    return pci_read_reg32(device->dev_info+ DEV_REG_ADDR_MEMORY_SIZE);
+}
+
+u32 mag_cap_dev_get_vfs_frame_count(struct mag_cap_dev *device)
+{
+    return pci_read_reg32(device->dev_info+ DEV_REG_ADDR_VFS_FRAME_COUNT);
+}
+
+u32 mag_cap_dev_get_vfs_full_buffer_address(struct mag_cap_dev *device)
+{
+    return 0;
+}
+
+u32 mag_cap_dev_get_vfs_full_frame_size(struct mag_cap_dev *device)
+{
+    return pci_read_reg32(device->dev_info+ DEV_REG_ADDR_VFS_FULL_FRAME_SIZE);
+}
+
+u32 mag_cap_dev_get_vfs_quarter_buffer_address(struct mag_cap_dev *device)
+{
+    u32 frame_count = pci_read_reg32(device->dev_info+ DEV_REG_ADDR_VFS_FRAME_COUNT);
+    u32 full_frame_size = pci_read_reg32(device->dev_info+ DEV_REG_ADDR_VFS_FULL_FRAME_SIZE);
+    return frame_count * full_frame_size;
+}
+
+u32 mag_cap_dev_get_vfs_quarter_frame_size(struct mag_cap_dev *device)
+{
+    // Check if quarter frame buffer disabled
+    if (pci_read_reg32(device->dev_info+ DEV_REG_ADDR_DEVICE_STATUS) & 0x80000000)
+        return 0;
+
+    return mag_cap_dev_get_vfs_full_frame_size(device) / 4;
+}
+
+
+
+u32 mag_cap_dev_get_user_buffer_address(struct mag_cap_dev *device, u32 *size)
+{
+    u32 frame_count = pci_read_reg32(device->dev_info+ DEV_REG_ADDR_VFS_FRAME_COUNT);
+    u32 full_frame_size = pci_read_reg32(device->dev_info+ DEV_REG_ADDR_VFS_FULL_FRAME_SIZE);
+    u32 quarter_frame_size =
+            (pci_read_reg32(device->dev_info+ DEV_REG_ADDR_DEVICE_STATUS) & 0x80000000) ?
+                0 : (full_frame_size / 4);
+    u32 address = (full_frame_size + quarter_frame_size) * frame_count;
+    if (NULL != size)
+        *size = pci_read_reg32(device->dev_info+ DEV_REG_ADDR_MEMORY_SIZE) - address;
+
+    return address;
+}
+
+u32 mag_cap_dev_get_ref_clk_freq(struct mag_cap_dev *device)
+{
+    return pci_read_reg32(device->dev_info+ DEV_REG_ADDR_REF_CLK_FREQ);
+}
+
+
+
+bool video_capture_IsInputMemoryBusy(struct mag_cap_dev *vc)
+{   
+	    return (pci_read_reg32(vc->vid_cap_addr + VIDEO_REG_ADDR_INPUT_STATUS) & 0x01) != 0;
+}
+
+
+
+bool video_capture_GetInputFrameInfo(
+        struct mag_cap_dev *vc,
+        int * pnField,
+        int * pnFieldIndex,
+        int * pnFrameID
+        )
+{   
+    unsigned int dwFrameStatus = pci_read_reg32(vc->vid_cap_addr + VIDEO_REG_ADDR_INPUT_FRAME_INFO);
+    
+    if (pnField) *pnField = ((dwFrameStatus & 0x40000000) == 0) ? 0 : 1;
+    if (pnFieldIndex) *pnFieldIndex = ((dwFrameStatus & 0x20000000) == 0) ? 0 : 1;
+    if (pnFrameID) *pnFrameID = ((dwFrameStatus >> 16) & 0x000000FF);
+    
+    return ((dwFrameStatus & 0x80000000) != 0);
+}
+
+long long video_capture_GetVFSFullFrameTime(struct mag_cap_dev *vc)
+{   
+    unsigned int dwHigh = pci_read_reg32(vc->vid_cap_addr+ VIDEO_REG_ADDR_VFS_FULL_TIMESTAMP_HIGH);
+    unsigned int dwLow = pci_read_reg32(vc->vid_cap_addr+ VIDEO_REG_ADDR_VFS_FULL_TIMESTAMP_LOW);
+    
+    return ((long long)dwHigh << 32) | dwLow;
+}
+
+
+bool video_capture_GetVFSFullFrameInfo(
+        struct mag_cap_dev *vc,
+        int * pnField,
+        int * pnFieldIndex,
+        int * pnFrameID)
+{
+    unsigned int dwFrameStatus = pci_read_reg32(vc->vid_cap_addr+ VIDEO_REG_ADDR_VFS_FULL_FRAME_INFO);
+
+    if (pnField) *pnField = ((dwFrameStatus & 0x40000000) == 0) ? 0 : 1;
+    if (pnFieldIndex) *pnFieldIndex = ((dwFrameStatus & 0x20000000) == 0) ? 0 : 1;
+    if (pnFrameID) *pnFrameID = ((dwFrameStatus >> 16) & 0x000000FF);
+
+    return ((dwFrameStatus & 0x80000000) != 0);
+}
+
+bool video_capture_GetVFSFullStripeInfo(
+        struct mag_cap_dev *vc,
+        int * pnField,
+        int * pnFieldIndex,
+        int * pnLineID,
+        int * pnFrameID
+        )
+{
+    unsigned int dwStripeStatus = pci_read_reg32(vc->vid_cap_addr + VIDEO_REG_ADDR_VFS_FULL_STRIPE_INFO);
+
+    if (pnLineID) *pnLineID = (dwStripeStatus & 0xFFFF);
+    if (pnField) *pnField = ((dwStripeStatus & 0x40000000) == 0) ? 0 : 1;
+    if (pnFieldIndex) *pnFieldIndex = ((dwStripeStatus & 0x20000000) == 0) ? 0 : 1;
+    if (pnFrameID) *pnFrameID = ((dwStripeStatus >> 16) & 0x000000FF);
+
+    return ((dwStripeStatus & 0x80000000) != 0);
+}
+
+long long video_capture_GetVFSQuarterFrameTime(struct mag_cap_dev *vc)
+{
+    unsigned int dwHigh = pci_read_reg32(vc->vid_cap_addr + VIDEO_REG_ADDR_VFS_QUARTER_TIMESTAMP_HIGH);
+    unsigned int dwLow = pci_read_reg32(vc->vid_cap_addr + VIDEO_REG_ADDR_VFS_QUARTER_TIMESTAMP_LOW);
+
+    return ((long long)dwHigh << 32) | dwLow;
+}
+
+bool video_capture_GetVFSQuarterFrameInfo(struct mag_cap_dev *vc, int * pnFrameID)
+{
+    unsigned int dwFrameStatus = pci_read_reg32(vc->vid_cap_addr + VIDEO_REG_ADDR_VFS_QUARTER_FRAME_INFO);
+
+    if (pnFrameID) *pnFrameID = ((dwFrameStatus >> 16) & 0x000000FF);
+
+    return ((dwFrameStatus & 0x80000000) != 0);
+}
+
+bool video_capture_GetVFSQuarterStripeInfo(
+        struct mag_cap_dev *vc,
+        int * pnLineID,
+        int * pnFrameID
+        )
+{
+    unsigned int dwStripeStatus = pci_read_reg32(vc->vid_cap_addr + VIDEO_REG_ADDR_VFS_QUARTER_STRIPE_INFO);
+
+    if (pnLineID) *pnLineID = (dwStripeStatus & 0xFFFF);
+    if (pnFrameID) *pnFrameID = ((dwStripeStatus >> 16) & 0x000000FF);
+
+    return ((dwStripeStatus & 0x80000000) != 0);
+}
+
+
+u32 xi_device_get_vfs_frame_count(struct mag_cap_dev *device)
+{
+    return pci_read_reg32(device->dev_info + DEV_REG_ADDR_VFS_FRAME_COUNT);
+}
+
+u32 xi_device_get_vfs_full_buffer_address(struct mag_cap_dev *device)
+{
+	    return 0;
+}
+
+u32 xi_device_get_vfs_full_frame_size(struct mag_cap_dev *device)
+{
+	    return pci_read_reg32(device->dev_info + DEV_REG_ADDR_VFS_FULL_FRAME_SIZE);
+}
+
+
+
+unsigned int video_capture_GetFullFrameBaseAddr(
+        struct mag_cap_dev *vc,
+        int iFrameID
+        )
+{
+	unsigned int dwFullFrameBufferAddr = xi_device_get_vfs_full_buffer_address(vc);
+	
+        unsigned int frame_base_addr = dwFullFrameBufferAddr + xi_device_get_vfs_full_frame_size(vc) * (unsigned int)iFrameID;
+	return frame_base_addr;
 }
 

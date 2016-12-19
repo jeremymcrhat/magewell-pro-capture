@@ -47,22 +47,22 @@
 
 
 enum DEV_INFO_REG_ADDR {
-    REG_ADDR_HARDWARE_VER = 4 * 0,
-    REG_ADDR_FIRMWARE_VER = 4 * 1,
-    REG_ADDR_PRODUCT_ID = 4 * 2,
-    REG_ADDR_CHANNEL_ID = 4 * 3,
-    REG_ADDR_DEVICE_STATUS = 4 * 4,
-    REG_ADDR_PCIE_DEVICE_ADDR = 4 * 5,
-    REG_ADDR_PCIE_LINK_STATUS = 4 * 6,
-    REG_ADDR_PCIE_PAYLOAD_SIZE = 4 * 7,
-    REG_ADDR_DEVICE_TEMPERATURE = 4 * 8,
-    REG_ADDR_RECONFIG_DELAY = 4 * 9,
-    REG_ADDR_MEMORY_SIZE = 4 * 10,
-    REG_ADDR_VFS_FRAME_COUNT = 4 * 11,
-    REG_ADDR_VFS_FULL_FRAME_SIZE = 4 * 12,
-    REG_ADDR_MAX_IMAGE_DIMENSION = 4 * 14,
-    REG_ADDR_REF_CLK_FREQ = 4 * 15,
-    REG_ADDR_LED_CONTROL = 4 * 0
+    DEV_REG_ADDR_HARDWARE_VER = 4 * 0,
+    DEV_REG_ADDR_FIRMWARE_VER = 4 * 1,
+    DEV_REG_ADDR_PRODUCT_ID = 4 * 2,
+    DEV_REG_ADDR_CHANNEL_ID = 4 * 3,
+    DEV_REG_ADDR_DEVICE_STATUS = 4 * 4,
+    DEV_REG_ADDR_PCIE_DEVICE_ADDR = 4 * 5,
+    DEV_REG_ADDR_PCIE_LINK_STATUS = 4 * 6,
+    DEV_REG_ADDR_PCIE_PAYLOAD_SIZE = 4 * 7,
+    DEV_REG_ADDR_DEVICE_TEMPERATURE = 4 * 8,
+    DEV_REG_ADDR_RECONFIG_DELAY = 4 * 9,
+    DEV_REG_ADDR_MEMORY_SIZE = 4 * 10,
+    DEV_REG_ADDR_VFS_FRAME_COUNT = 4 * 11,
+    DEV_REG_ADDR_VFS_FULL_FRAME_SIZE = 4 * 12,
+    DEV_REG_ADDR_MAX_IMAGE_DIMENSION = 4 * 14,
+    DEV_REG_ADDR_REF_CLK_FREQ = 4 * 15,
+    DEV_REG_ADDR_LED_CONTROL = 4 * 0
 };
 
 static inline uint32_t pci_read_reg32(volatile void *addr) {
@@ -79,7 +79,13 @@ static inline void pci_write_reg32(volatile void *addr, uint32_t val) {
 
 #define SERIAL_NO_LEN	16
 
-
+typedef struct _MWCAP_SMPTE_TIMECODE {
+        unsigned char byFrames;
+        unsigned char bySeconds;
+        unsigned char byMinutes;
+        unsigned char byHours;
+} MWCAP_SMPTE_TIMECODE;
+    
 typedef struct _MWCAP_VIDEO_BUFFER_INFO {
     unsigned int cMaxFrames;
 
@@ -92,6 +98,31 @@ typedef struct _MWCAP_VIDEO_BUFFER_INFO {
     unsigned char iNewestBufferedFullFrame;
     unsigned int cBufferedFullFrames;
 } MWCAP_VIDEO_BUFFER_INFO;
+
+typedef enum _MWCAP_VIDEO_FRAME_STATE {
+    MWCAP_VIDEO_FRAME_STATE_INITIAL,
+    MWCAP_VIDEO_FRAME_STATE_F0_BUFFERING,
+    MWCAP_VIDEO_FRAME_STATE_F1_BUFFERING,
+    MWCAP_VIDEO_FRAME_STATE_BUFFERED
+} MWCAP_VIDEO_FRAME_STATE;
+
+
+typedef struct _MWCAP_VIDEO_FRAME_INFO {
+    MWCAP_VIDEO_FRAME_STATE state;
+    bool bInterlaced;
+    bool bSegmentedFrame;
+    bool bTopFieldFirst;
+    bool bTopFieldInverted;
+    int cx;
+    int cy;
+    int nAspectX;
+    int nAspectY;
+
+    long long allFieldStartTimes[2];
+    long long allFieldBufferedTimes[2];
+    MWCAP_SMPTE_TIMECODE aSMPTETimeCodes[2];
+} MWCAP_VIDEO_FRAME_INFO;
+    
 
 
 #include "mw-sg.h"

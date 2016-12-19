@@ -76,8 +76,9 @@ int xi_pcie_dma_desc_chain_set_item(
     PCIE_DMA_DESCRIPTOR * pitems =
             (PCIE_DMA_DESCRIPTOR *)(os_contig_dma_get_virt(pobj->addr_desc));
 
-    if (item >= pobj->max_items)
+    if (item >= pobj->max_items) {
         return -1;
+    }
 
 	pitems[item].dwHostAddrHigh = host_addr_high;
 	pitems[item].dwHostAddrLow  = host_addr_low;
@@ -99,8 +100,9 @@ static void _set_image_endtag_end_irq(
     PCIE_DMA_DESCRIPTOR * plastitem;
     xi_pcie_dma_desc_chain_set_num_items(pobj, item, false);
 
+    printk("  ## %s item=%d ## \n", __func__, item);
     plastitem =
-            (PCIE_DMA_DESCRIPTOR *)(os_contig_dma_get_virt(pobj->addr_desc)) + (item - 1);
+            (PCIE_DMA_DESCRIPTOR *)(os_contig_dma_get_virt(pobj->addr_desc)) + (item);
     plastitem->dwFlagsAndLen |= (DMA_DESC_IRQ_ENABLE | DMA_DESC_TAG_VALID);
     plastitem->dwTag |= 0x80000000; // Frame end flag
 }
@@ -202,7 +204,8 @@ int xi_pcie_dma_desc_chain_build(
 	printk(" %s <<-- enter \n", __func__);
     if (FOURCC_IsPacked(fourcc))
     {   
-	    printk("         FOURCC packed stride= 0x%lx \n", stride);
+	    printk("         FOURCC packed stride= 0x%x \n", stride);
+	    printk("         FOURCC packed xfer_rect [left=%d right=%d top=%d bottom=%d] bpp=%d stride=0x%x bottom_up=%d \n", xfer_rect->left, xfer_rect->right, xfer_rect->top, xfer_rect->bottom, bpp, stride, (int)bottom_up);
         _sg_build_desc_chain_packed(pobj, sgbuf, sgnum, cx, cy, bpp, stride,
                                     bottom_up, notify, xfer_rect);
     }
@@ -321,6 +324,7 @@ static unsigned long _sg_build_desc_chain_packed(
 
     line = (u32)(cx * bpp / 8);
     padding = stride - line;
+    printk(" %s  addr sgone: 0x%lu addr_sgbuf: 0x%lx size: %d \n", __func__, &sgone, &sgbuf, sizeof(sgone));
 
     os_memcpy(&sgone, sgbuf, sizeof(sgone));
     _sgbuf_move_forward(&sgbuf, &sgone, offset, sglast);
@@ -347,6 +351,7 @@ static unsigned long _sg_build_desc_chain_packed(
         for (y = 0; y < cy; y++) {
             bool irq_enable = (cy_notify != 0) && ((y + 1) % cy_notify == 0);
             bool last_line = (y == (cy - 1));
+
 
             if (!_sg_transfer_video_line(
                         chain, &item, &sgbuf, &sgone, line,

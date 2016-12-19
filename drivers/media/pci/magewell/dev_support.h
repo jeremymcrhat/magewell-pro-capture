@@ -137,6 +137,8 @@ struct tw5864_input {
 
 	struct tw5864_buf *vb;
 
+	struct xi_stream_pipe *pipe;
+
         struct v4l2_ctrl *md_threshold_grid_ctrl;
         u16 md_threshold_grid_values[12 * 16];
         int qp;
@@ -153,6 +155,15 @@ struct tw5864_input {
 
 typedef void * os_dma_par_t;
 
+struct frame_info {
+	int line_id;
+	int frame_id;
+	int field;
+	int field_index;
+	bool bFrameCompleted;
+	long cyCompleted;
+};
+
 struct mag_cap_dev {
 	spinlock_t slock; /* used for sync between ISR, tasklet & V4L2 API */
 	void __iomem *reg_base; /* pointer to mapped registers memory */
@@ -162,6 +173,7 @@ struct mag_cap_dev {
 	struct tw5864_input inputs[NUM_INPUTS];
 	bool msi_enabled;
 	int encoder_busy;
+	int enabled;
 	int h264_buf_r_index;
         int h264_buf_w_index;
 
@@ -171,6 +183,7 @@ struct mag_cap_dev {
 	/* pci i/o */
 	struct pci_dev *pci;
 	void __iomem *mmio;
+	void __iomem *dev_info;
 	u32 irqmask;
 	void __iomem *dna_addr;
 	struct ds28e01_device ds28e01;
@@ -195,7 +208,11 @@ struct mag_cap_dev {
 	void __iomem *vid_cap_addr;
 	u32 video_cap_enabled_int;
 	struct device *parent_dev;
-	os_dma_par_t dma_priv;	
+	os_dma_par_t dma_priv;
+	struct completion frame_done;
+	struct mutex capture_busy;
+	struct frame_info current_frame[4];
+	int current_frame_id;
 };
 
 
